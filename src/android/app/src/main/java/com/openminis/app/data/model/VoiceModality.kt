@@ -30,6 +30,8 @@ object SystemVoiceIds {
     const val BUILTIN_PROVIDER_ID = "__builtin_system_speech__"
     const val SYSTEM_ASR_ONLINE = "system-asr-online"
     const val SYSTEM_ASR_OFFLINE = "system-asr-offline"
+    /** 端侧 SenseVoice（sherpa-onnx，模型在 App 外部 files/models/asr-sensevoice）。 */
+    const val SYSTEM_ASR_SENSEVOICE = "system-asr-sensevoice"
     const val SYSTEM_TTS = "system-tts"
 }
 

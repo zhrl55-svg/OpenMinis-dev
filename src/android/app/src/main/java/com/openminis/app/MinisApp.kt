@@ -261,6 +261,15 @@ class MinisApp : Application(), ImageLoaderFactory {
         // [T-oauth-wait-fgs] Before anything can start an OAuth callback server:
         // gives it a context to keep the process out of the freezer with.
         com.openminis.app.service.OAuthWaitKeepAlive.install(this)
+        // [T-minis-hub] Bring the cross-device link up with the app, so the
+        // account's device list is already there when the first question is
+        // asked (the tool schema lists the online devices by name). Only when
+        // a relay is configured — otherwise there is nothing to connect to.
+        if (com.openminis.app.hub.HubIdentity.hasCredentials(this) &&
+            com.openminis.app.hub.HubIdentity.isEnabled(this)) {
+            // Never let the cross-device link take the app down with it.
+            runCatching { com.openminis.app.hub.HubService.start(this) }
+        }
         // [T-android-tls-trust-error] Localized text for a rejected certificate;
         // LLMError has no Context of its own.
         com.openminis.app.data.model.CertificateErrorText.resolver = { kind, host ->
@@ -426,6 +435,13 @@ class MinisApp : Application(), ImageLoaderFactory {
         // Scan filesDir/logs/ for crash-*.log + native-crash-*.log files
         // touched in the last hour; if THRESHOLD+ are present, stash the
         // list so MainActivity.onCreate can prompt to share them.
+        // [T-minis-hub-recovery] Drop a stale crash burst before the
+        // detector counts it: two crash files from an install storm put the
+        // app into safe mode, and every launch then kills itself through
+        // MainActivity.finishAndRestartProcess — the app "flashes and dies".
+        // Crash files older than a few minutes are history, not a live
+        // crash loop, so they must not keep the app in safe mode.
+        com.openminis.app.crash.CrashStateRecovery.dropStaleCrashLogs(this)
         com.openminis.app.crash.CrashFrequencyDetector.checkAtLaunch(this)
 
         // [OpenMinis#363] Recover the PREVIOUS process death from the system.

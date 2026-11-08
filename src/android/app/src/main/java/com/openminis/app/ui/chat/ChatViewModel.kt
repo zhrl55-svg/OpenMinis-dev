@@ -2514,6 +2514,12 @@ class ChatViewModel(
             isHelper = isHelper,
             delegateEnabled = com.openminis.app.tools.AgentToolSwitch.AGENTS.isEnabled(context),
             browserEnabled = com.openminis.app.tools.AgentToolSwitch.BROWSER.isEnabled(context),
+            // [T-minis-hub] The cross-device tool and the live device names
+            // (contract M4). The names are read here, not cached, so the
+            // schema always matches the device table.
+            hubEnabled = com.openminis.app.tools.AgentToolSwitch.HUB.isEnabled(context) &&
+                com.openminis.app.hub.Hub.hasCredentials(context),
+            hubDeviceNames = com.openminis.app.hub.Hub.onlineTargetNames(),
             // [T-sub-agents-v1] Rebuilt on every schema build (this property is
             // not cached), so renaming a sub agent takes effect on the next
             // request and the enum can never advertise a name the resolver
@@ -9021,6 +9027,45 @@ class ChatViewModel(
     }
 
     /**
+     * [T-android-queued-message-edit] Rewrite a still-queued prompt in place.
+     *
+     * A queued prompt lives in two places that must agree: the dashed bubble
+     * renders `ChatMessage.content`, while delivery reads `QueuedPrompt.text`.
+     * Editing only the bubble would be cosmetic — the model would still get the
+     * text the user meant to fix. Both are updated here, atomically enough for
+     * this single-threaded main-dispatcher path.
+     *
+     * Only a USER prompt is editable. A PROGRAMMATIC entry (scheduled fire,
+     * sub-agent callback, RPC/CLI send) is machine-authored: its text carries
+     * the envelope the loop parses to recognise it, and letting a human rewrite
+     * that would silently break the marker rather than edit a message.
+     *
+     * @return false when the message is not an editable queued prompt, or when
+     *   the edit would leave nothing to deliver (blank text on a prompt with no
+     *   attachments).
+     */
+    fun editQueuedMessage(messageId: String, newText: String): Boolean {
+        val msg = _messages.value.firstOrNull { it.id == messageId } ?: return false
+        if (!msg.isQueued) return false
+        val pid = msg.queuedPromptId ?: return false
+        val prompt = _promptQueue.value.firstOrNull { it.id == pid } ?: return false
+        if (prompt.origin != QueuedPromptOrigin.USER) return false
+        val trimmed = newText.trim()
+        // An attachment-only prompt legitimately has no text; a text prompt
+        // cleared to nothing would deliver an empty turn.
+        if (trimmed.isEmpty() && prompt.attachments.isEmpty()) return false
+        if (trimmed == prompt.text) return true
+        _promptQueue.value = _promptQueue.value.map {
+            if (it.id == pid) it.copy(text = trimmed) else it
+        }
+        _messages.value = _messages.value.map {
+            if (it.id == messageId) it.copy(content = userBubbleText(trimmed)) else it
+        }
+        Log.i(TAG, "Edited queued message $pid (${trimmed.length}ch), queue=${_promptQueue.value.size}")
+        return true
+    }
+
+    /**
      * [T-android-queued-message-interrupt-on-toolclose] Mid-tool-loop
      * interrupt: take everything in [_promptQueue] right now, finalize the
      * just-finished assistant bubble in the UI, persist a fresh user
@@ -14173,6 +14218,13 @@ class ChatViewModel(
                 } else {
                     toolDisabledResult("browser_use")
                 }
+            // [T-minis-hub] A call to another device of the account. The
+            // approval card is rendered inside this tool block, and its
+            // answer travels back as an `approve` call (contract C4/C4.2).
+            com.openminis.app.hub.HubCallTool.NAME -> {
+                com.openminis.app.hub.Hub.ensureStarted(context)
+                com.openminis.app.hub.HubCallTool.execute(argsJson, fsSessionId, toolId, context)
+            }
             "memory_write" -> executeMemoryWriteTool(argsJson)
             // [T-sub-agents-v1] One tool, five actions. The legacy names are
             // accepted so a replayed call from a transcript written before the

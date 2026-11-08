@@ -27,6 +27,11 @@ enum class AgentToolSwitch(val key: String, val defaultValue: Boolean) {
 
     /** [T-port-user-ask] user_ask - on by default, as on iOS (UserAskSettings.defaultEnabled). */
     USER_ASK(com.openminis.app.agent.userask.UserAskSettingsSpec.ENABLED_KEY, com.openminis.app.agent.userask.UserAskSettingsSpec.DEFAULT_ENABLED),
+
+    /** hub_call — the cross-device channel. It only shows up once a relay is
+     *  configured (the caller checks `Hub.hasCredentials` as well), so the
+     *  default is on: there is nothing to turn on until a relay exists. */
+    HUB("agent.tools.hub.enabled", true),
     ;
 
     fun isEnabled(context: Context): Boolean =
@@ -45,6 +50,8 @@ enum class AgentToolSwitch(val key: String, val defaultValue: Boolean) {
         /** The switch governing a tool name; null = always available. */
         fun governing(toolName: String): AgentToolSwitch? = when (toolName) {
             "browser_use" -> BROWSER
+            // [T-minis-hub] The cross-device tool.
+            "hub_call" -> HUB
             // [T-sub-agents-v1] The renamed tool plus the two names
             // shipped builds wrote, so the switch still governs a
             // replayed call from an older transcript.

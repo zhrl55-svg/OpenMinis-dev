@@ -210,6 +210,12 @@ object ToolFoldPlanner {
             // iOS: delegate and user_ask blocks are never folded.
             com.openminis.app.agent.jobs.HelperRunner.isSubAgentToolName(block.toolName) -> Input.Barrier
             block.toolName == com.openminis.app.agent.userask.UserAskPromptText.TOOL_NAME -> Input.Barrier
+            // [T-minis-hub] A cross-device call is never folded either: the
+            // approval card lives inside this block, and a card folded into
+            // "Ran 3 tools" is a request the person cannot see, let alone
+            // answer. Folding it away would also hide the remote output that
+            // replaced the card once it was answered.
+            block.toolName == com.openminis.app.hub.HubCallTool.NAME -> Input.Barrier
             else -> when (block.toolStatus) {
                 ToolBlockStatus.SUCCESS -> Input.Tool(ToolOutcome.SUCCEEDED)
                 // A timed-out call ended in failure; the capsule shows it as such.

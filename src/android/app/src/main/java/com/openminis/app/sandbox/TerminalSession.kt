@@ -214,7 +214,12 @@ class TerminalSession(private val context: Context) {
                 // `clear` above so it is not wiped.
                 scope.launch {
                     kotlinx.coroutines.delay(if (sessionId != null) 600 else 300)
-                    _outputBytes.emit(banner(sessionId).toByteArray())
+                    // [T-terminal-banner-optin] Off by default - see
+                    // AppearanceScreen's KEY_TERMINAL_BANNER. The leading CRLF
+                    // keeps it off the prompt line when it IS shown.
+                    if (bannerEnabled()) {
+                        _outputBytes.emit(("\r\n" + banner(sessionId)).toByteArray())
+                    }
                 }
 
                 readerJob = scope.launch { readLoop() }
@@ -248,6 +253,7 @@ class TerminalSession(private val context: Context) {
                         childPid = 0
                         readerJob?.cancel()
                         readerJob = null
+                        _state.value = State.BOOTING // allow start() past its RUNNING guard
                         start(sessionId, cols, rows)
                         return@launch
                     }
@@ -430,6 +436,13 @@ class TerminalSession(private val context: Context) {
      * belongs to no chat, and saying so up front prevents "I saved it in the
      * terminal and the agent can't see it".
      */
+    /** [T-terminal-banner-optin] Whether the start-up hint line is shown. */
+    private fun bannerEnabled(): Boolean =
+        context.getSharedPreferences(
+            com.openminis.app.ui.settings.PREF_APPEARANCE,
+            android.content.Context.MODE_PRIVATE,
+        ).getBoolean(com.openminis.app.ui.settings.KEY_TERMINAL_BANNER, false)
+
     private fun banner(sessionId: String?): String =
         if (sessionId != null) {
             "\u001b[2m[Minis] /var/minis/{workspace,attachments,offloads,browser} are this chat's " +

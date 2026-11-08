@@ -21,6 +21,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.verticalDrag
 import androidx.compose.ui.input.pointer.pointerInput
@@ -496,6 +497,146 @@ private fun Modifier.verticalScrollbar(
     )
 })
 
+// [T-android-fast-scrollbar] Draggable fast-scroll thumb for the chat list.
+//
+// Compose ships no scrollbar for LazyColumn, and the draw-only
+// `verticalScrollbar` above derives the thumb from the AVERAGE item size —
+// useless here: a tool card runs ~200px while a one-line reply is ~60px, and
+// this list is reverseLayout=true (index 0 sits at the visual BOTTOM), so
+// that helper would also paint the thumb upside down.
+//
+// This one works in ITEM-INDEX space instead of pixels: progress is
+// firstVisibleIndex / (total - visible), which needs no height estimate at
+// all. Dragging maps the finger back to an index and scrolls there; the user
+// watches the content move, so index granularity is plenty.
+private val FAST_SCROLL_TOUCH_WIDTH = 34.dp
+private val FAST_SCROLL_THUMB_WIDTH = 10.dp
+private val FAST_SCROLL_MIN_THUMB = 72.dp
+private const val FAST_SCROLL_IDLE_HIDE_MS = 900L
+
+@Composable
+private fun ChatFastScrollbar(
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    modifier: Modifier = Modifier,
+    onDragStart: () -> Unit = {},
+    onDragEnd: () -> Unit = {},
+) {
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val info = listState.layoutInfo
+    val totalCount = info.totalItemsCount
+    val visibleCount = info.visibleItemsInfo.size
+    val viewportPx = info.viewportSize.height.toFloat()
+    val canScroll = totalCount > 0 && visibleCount > 0 &&
+        visibleCount < totalCount && viewportPx > 0f
+
+    var dragging by remember { mutableStateOf(false) }
+    var shown by remember { mutableStateOf(false) }
+
+    LaunchedEffect(canScroll, listState.isScrollInProgress, dragging) {
+        if (!canScroll) {
+            shown = false
+            return@LaunchedEffect
+        }
+        if (dragging || listState.isScrollInProgress) {
+            shown = true
+        } else {
+            kotlinx.coroutines.delay(FAST_SCROLL_IDLE_HIDE_MS)
+            shown = false
+        }
+    }
+
+    val alpha by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (shown || dragging) 1f else 0f,
+        animationSpec = androidx.compose.animation.core.tween(160),
+        label = "chatFastScrollAlpha",
+    )
+
+    // Finger Y -> list index. layoutInfo is re-read on every call so the
+    // gesture never works off a stale frame captured at composition time.
+    fun seekTo(y: Float) {
+        val li = listState.layoutInfo
+        val vp = li.viewportSize.height.toFloat()
+        val vis = li.visibleItemsInfo.size
+        val total = li.totalItemsCount
+        if (vp <= 0f || vis <= 0 || total <= vis) return
+        val th = (vp * (vis.toFloat() / total))
+            .coerceIn(with(density) { FAST_SCROLL_MIN_THUMB.toPx() }, vp)
+        val maxTop = (vp - th).coerceAtLeast(1f)
+        val maxFirst = (total - vis).coerceAtLeast(1)
+        val p = ((y - th / 2f) / maxTop).coerceIn(0f, 1f)
+        // reverseLayout=true: index 0 is at the visual bottom, so the top of
+        // the track maps to the OLDEST (largest) index.
+        val target = (((1f - p) * maxFirst) + 0.5f).toInt().coerceIn(0, maxFirst)
+        scope.launch { listState.scrollToItem(target, 0) }
+    }
+
+    if (canScroll || dragging) {
+        Box(
+            modifier = modifier
+                .width(FAST_SCROLL_TOUCH_WIDTH)
+                .fillMaxHeight()
+                .pointerInput(canScroll) {
+                    detectVerticalDragGestures(
+                        onDragStart = { offset ->
+                            dragging = true
+                            onDragStart()
+                            seekTo(offset.y)
+                        },
+                        onVerticalDrag = { change, _ ->
+                            change.consume()
+                            seekTo(change.position.y)
+                        },
+                        onDragEnd = {
+                            dragging = false
+                            onDragEnd()
+                        },
+                        onDragCancel = {
+                            dragging = false
+                            onDragEnd()
+                        },
+                    )
+                },
+        ) {
+            // [T-android-fast-scrollbar] Theme-aware thumb: the old fixed
+            // 0x66888888 grey vanished on the near-black dark background.
+            val fastScrollThumbColor = if (ChatColors.isDark) {
+                Color(0xFFE8E8EE).copy(alpha = 0.55f * alpha)
+            } else {
+                Color(0xFF5A5A62).copy(alpha = 0.45f * alpha)
+            }
+            androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                if (alpha <= 0.01f) return@Canvas
+                val li = listState.layoutInfo
+                val total = li.totalItemsCount
+                val vis = li.visibleItemsInfo.size
+                if (vis <= 0 || total <= vis) return@Canvas
+                val firstIdx = li.visibleItemsInfo.firstOrNull()?.index ?: 0
+                val maxFirst = (total - vis).coerceAtLeast(1)
+                val ratio = (firstIdx.toFloat() / maxFirst).coerceIn(0f, 1f)
+                val progress = 1f - ratio
+                val thumbWidthPx = FAST_SCROLL_THUMB_WIDTH.toPx()
+                val thumbHeightPx = (size.height * (vis.toFloat() / total))
+                    .coerceIn(FAST_SCROLL_MIN_THUMB.toPx(), size.height)
+                val maxTop = (size.height - thumbHeightPx).coerceAtLeast(0f)
+                val top = progress * maxTop
+                drawRoundRect(
+                    color = fastScrollThumbColor,
+                    topLeft = androidx.compose.ui.geometry.Offset(
+                        size.width - thumbWidthPx - 2f,
+                        top,
+                    ),
+                    size = androidx.compose.ui.geometry.Size(thumbWidthPx, thumbHeightPx),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                        thumbWidthPx / 2,
+                        thumbWidthPx / 2,
+                    ),
+                )
+            }
+        }
+    }
+}
+
 // [T-android-tool-autoscroll] Combined signal for the streaming auto-follow
 // LaunchedEffect. data class so distinctUntilChanged uses structural equality
 // — any field flip propagates a tick. Per-block (id, kind, status, length)
@@ -624,6 +765,16 @@ fun ChatScreen(
     val revealedUsageIds by viewModel.revealedUsageIds.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    // [T-android-queued-message-edit] Prompt ids a user typed and can still
+    // rewrite. Machine-authored queue entries (scheduled fires, sub-agent
+    // callbacks, RPC sends) carry an envelope in their text, so they are
+    // excluded here rather than failing silently at save time.
+    val queuedPrompts by viewModel.promptQueue.collectAsState()
+    val editableQueuedIds = remember(queuedPrompts) {
+        queuedPrompts
+            .filter { it.origin == QueuedPromptOrigin.USER }
+            .mapTo(HashSet()) { it.id }
+    }
     // [T-android-jankdiag] Tag frame summaries with "a reply is streaming".
     LaunchedEffect(isStreaming) { com.openminis.app.diagnostics.JankDiag.setStreaming(isStreaming) }
     // [T-android-jankdiag] A chat opens inside the sessions route on a phone: name it.
@@ -1031,6 +1182,10 @@ fun ChatScreen(
     // would summarize up to, or null when no confirmation is open. Same
     // id-as-state shape as deleteFromHereTargetId above.
     var compactAboveTargetId by remember { mutableStateOf<String?>(null) }
+    // [T-android-queued-message-edit] Id of the queued message whose editor is
+    // open, or null. Same id-as-state shape: one source of truth for both the
+    // dialog and its target.
+    var queuedEditTargetId by remember { mutableStateOf<String?>(null) }
     // [T-new-chat-menu-entry] Confirmation gate for "New Chat" while the
     // current session is still streaming — stopping the running task needs
     // an explicit confirm; idle sessions skip the dialog entirely.
@@ -4968,6 +5123,17 @@ fun ChatScreen(
                                 onWithdraw = if (item.message.isQueued) {
                                     { safeMutate { viewModel.withdrawQueuedMessage(item.message.id) } }
                                 } else null,
+                                // [T-android-queued-message-edit] Rewrite the
+                                // pending prompt instead of truncating history
+                                // (the ordinary Edit below is hidden while
+                                // queued for exactly that reason). Only a
+                                // prompt the user typed qualifies.
+                                onEditQueued = if (
+                                    item.message.isQueued &&
+                                    item.message.queuedPromptId?.let { it in editableQueuedIds } == true
+                                ) {
+                                    { queuedEditTargetId = item.message.id }
+                                } else null,
                                 // [T-multi-select-share] Share Chat… with this round preselected.
                                 // Queued bubbles offer it too, as on iOS; a queued message is
                                 // not selectable, so the picker opens with nothing selected.
@@ -5113,6 +5279,17 @@ fun ChatScreen(
                                 // never became a question shows as a plain pill.
                                 CompositionLocalProvider(LocalChatToggleAnchor provides toggleAnchor) {
                                     UserAskBlock(item.block) {
+                                        ToolCallPill(item.block, allToolBlocks = item.allToolBlocks, onOpenDetail = { viewModel.openToolDetail(it) })
+                                    }
+                                }
+                            } else if (item.block.toolName == com.openminis.app.hub.HubCallTool.NAME) {
+                                // [T-minis-hub] A cross-device call. While the
+                                // other device is waiting for an approval this
+                                // block shows that card; otherwise it stays the
+                                // ordinary pill (the card is only rendered
+                                // when a live ask exists — see HubApprovalBlock).
+                                CompositionLocalProvider(LocalChatToggleAnchor provides toggleAnchor) {
+                                    HubApprovalBlock(item.block) {
                                         ToolCallPill(item.block, allToolBlocks = item.allToolBlocks, onOpenDetail = { viewModel.openToolDetail(it) })
                                     }
                                 }
@@ -5422,6 +5599,18 @@ fun ChatScreen(
                     controller = selectionController,
                     listState = listState,
                     reverseLayout = true,
+                )
+                // [T-android-fast-scrollbar] Mounted LAST inside the list Box
+                // so it draws above the message list and owns its own 16dp
+                // strip. Starting a drag clears the auto-follow latch, so a
+                // streaming reply cannot yank the viewport back to the bottom
+                // mid-scrub.
+                ChatFastScrollbar(
+                    listState = listState,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight(),
+                    onDragStart = { userScrolledAway = true },
                 )
                 } // Box (selection scope)
                 } // CompositionLocalProvider
@@ -6724,6 +6913,10 @@ fun ChatScreen(
                             // focus-driven lifecycle.
                             contextUsageHint = contextUsageHint,
                             onEditProvider = onEditProviderClick,
+                            // [T-android-voice-auto-send] The panel reports a
+                            // final transcript; the composer owns sending, so
+                            // reuse the same path a Send tap takes.
+                            onAutoSend = { submitAfterVoice() },
                         )
                     } else if (recIsRecording) {
                         val levels by com.openminis.app.speech.SpeechRecognitionManager
@@ -8159,6 +8352,28 @@ fun ChatScreen(
                         compactAboveTargetId = null
                     },
                 )
+            }
+            // [T-android-queued-message-edit] Editor for a still-queued prompt.
+            // Looks the message up by id every composition so a queue drain or
+            // a withdraw that lands while the editor is open closes it instead
+            // of leaving a dialog pointed at nothing.
+            queuedEditTargetId?.let { targetId ->
+                val target = messages.firstOrNull { it.id == targetId }
+                if (target == null || !target.isQueued) {
+                    LaunchedEffect(targetId) { queuedEditTargetId = null }
+                } else {
+                    QueuedMessageEditDialog(
+                        initialText = target.content,
+                        // An attachment-only prompt is deliverable with the
+                        // text cleared; a plain one is not.
+                        canBeBlank = target.attachmentNames.isNotEmpty(),
+                        onDismiss = { queuedEditTargetId = null },
+                        onSave = { newText ->
+                            viewModel.editQueuedMessage(targetId, newText)
+                            queuedEditTargetId = null
+                        },
+                    )
+                }
             }
             // [T-multi-select-share] The share picker (and, from it, the preview).
             com.openminis.app.ui.chat.share.ChatShareDebugHost(sessionId, viewModel, openSharePicker)

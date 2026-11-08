@@ -657,6 +657,9 @@
     <string name="appearance_return_key_footer">选择聊天输入框中回车键的行为：插入换行或发送消息。硬件键盘 Shift+Return 始终插入换行。</string>
     <string name="appearance_return_key_newline">换行</string>
     <string name="appearance_return_key_send">发送</string>
+    <string name="appearance_section_terminal">终端</string>
+    <string name="appearance_terminal_banner_title">终端启动横幅</string>
+    <string name="appearance_terminal_banner_footer">打开终端时显示一行提示，说明当前会话的智能体能看到哪些目录。默认关闭。</string>
     <string name="appearance_section_keep_awake">屏幕常亮</string>
     <string name="appearance_keep_awake_footer">有会话任务运行时保持屏幕不熄灭，可能增加电量损耗。</string>
     <string name="appearance_keep_awake_title">屏幕常亮</string>
@@ -1343,6 +1346,10 @@
     <string name="add_models_to_group_all_in_group">所有模型都已在该分组里。</string>
     <string name="add_models_to_group_no_match">没有匹配的模型。</string>
     <string name="chat_longpress_edit">编辑</string>
+    <string name="chat_queued_edit">修改排队消息</string>
+    <string name="chat_queued_edit_title">修改排队消息</string>
+    <string name="chat_queued_edit_hint">这条消息还在排队，尚未发送。修改后在原位置发出。</string>
+    <string name="chat_queued_edit_placeholder">消息内容</string>
     <string name="chat_longpress_delete_from_here">从此处删除</string>
     <string name="chat_delete_from_here_confirm">删除</string>
     <plurals name="chat_delete_from_here_dialog_body">
@@ -1715,6 +1722,11 @@
     <string name="voice_panel_buffered_chars">… %1$d 字 …</string>
     <string name="voice_panel_cancel_transcription">取消转写</string>
     <string name="voice_panel_toggle_recording">开始/停止录音</string>
+    <!-- [T-android-voice-press-to-talk] 麦克风改成「按住说话」，不再是开关。 -->
+    <string name="voice_panel_hold_to_record">按住说话</string>
+    <!-- [T-android-voice-auto-send] 语音面板状态行上的自动发送开关。 -->
+    <string name="voice_auto_send_on">自动发送：开</string>
+    <string name="voice_auto_send_off">自动发送：关</string>
     <string name="voice_panel_delete">删除语音文字</string>
     <string name="voice_panel_read_replies">朗读回复</string>
     <string name="read_aloud_volume">朗读音量</string>
@@ -1722,6 +1734,7 @@
     <string name="tts_capsule_system_engine">系统 TTS</string>
     <string name="voice_system_tts_subtitle">Android 内置语音合成</string>
     <string name="voice_system_recognition_online">系统识别（在线）</string>
+    <string name="voice_on_device_sensevoice">SenseVoice（端侧）</string>
     <string name="voice_system_recognition_offline">系统识别（离线）</string>
     <string name="voice_system_online_subtitle">Android 内置，需要联网</string>
     <string name="voice_system_offline_subtitle">Android 内置，可离线使用</string>

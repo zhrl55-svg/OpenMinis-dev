@@ -730,6 +730,9 @@
     <string name="appearance_return_key_footer">Choose whether the Return key in the chat input inserts a newline or sends the message. Hardware Shift+Return always inserts a newline.</string>
     <string name="appearance_return_key_newline">Newline</string>
     <string name="appearance_return_key_send">Send</string>
+    <string name="appearance_section_terminal">Terminal</string>
+    <string name="appearance_terminal_banner_title">Terminal start-up banner</string>
+    <string name="appearance_terminal_banner_footer">Show one line when the terminal opens, naming the directories the agent in this chat can see. Off by default.</string>
     <string name="appearance_section_keep_awake">Keep Screen Awake</string>
     <string name="appearance_keep_awake_footer">Prevent the screen from sleeping while any session is running a task. May increase battery drain.</string>
     <string name="appearance_keep_awake_title">Keep Screen Awake</string>
@@ -1480,6 +1483,14 @@
 
     <!-- T187 — user-bubble long-press Edit + Exit Edit Mode + Clear Chat dialog -->
     <string name="chat_longpress_edit">Edit</string>
+    <!-- [T-android-queued-message-edit] Rewriting a prompt that is still on the
+         queue (dashed bubble). Distinct from chat_longpress_edit, which
+         truncates history to the edited turn — a queued message has not
+         reached history yet. -->
+    <string name="chat_queued_edit">Edit Queued Message</string>
+    <string name="chat_queued_edit_title">Edit Queued Message</string>
+    <string name="chat_queued_edit_hint">Still queued — not sent yet. Your changes go out when the queue reaches it.</string>
+    <string name="chat_queued_edit_placeholder">Message text</string>
     <string name="chat_longpress_delete_from_here">Delete From Here</string>
     <string name="chat_delete_from_here_confirm">Delete</string>
     <plurals name="chat_delete_from_here_dialog_body">
@@ -1879,6 +1890,11 @@
     <string name="voice_panel_buffered_chars">… %1$d chars …</string>
     <string name="voice_panel_cancel_transcription">Cancel transcription</string>
     <string name="voice_panel_toggle_recording">Toggle recording</string>
+    <!-- [T-android-voice-press-to-talk] The mic is a hold-to-talk button now, not a toggle. -->
+    <string name="voice_panel_hold_to_record">Hold to talk</string>
+    <!-- [T-android-voice-auto-send] Toggle chip in the voice panel status row. -->
+    <string name="voice_auto_send_on">Auto-send: on</string>
+    <string name="voice_auto_send_off">Auto-send: off</string>
     <string name="voice_panel_delete">Delete dictated text</string>
     <string name="voice_panel_read_replies">Read replies</string>
     <string name="read_aloud_volume">Read-aloud volume</string>
@@ -1886,6 +1902,7 @@
     <string name="tts_capsule_system_engine">System TTS</string>
     <string name="voice_system_tts_subtitle">Android built-in text-to-speech</string>
     <string name="voice_system_recognition_online">System Recognition (Online)</string>
+    <string name="voice_on_device_sensevoice">SenseVoice (On-device)</string>
     <string name="voice_system_recognition_offline">System Recognition (Offline)</string>
     <string name="voice_system_online_subtitle">Android built-in, needs network</string>
     <string name="voice_system_offline_subtitle">Android built-in, works offline</string>

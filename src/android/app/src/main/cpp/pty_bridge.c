@@ -36,15 +36,16 @@
  * close_range (Linux 5.9+) when available, else a bounded close loop.
  */
 static void closeInheritedFds(void) {
-#ifdef __NR_close_range
-    if (syscall(__NR_close_range, 3U, ~0U, 0U) == 0) return;
-#endif
-    long maxFd = 65536;
+    // [T-android-no-close-range] close_range() is not in every Android app
+    // seccomp whitelist. Where it is missing the raw syscall is killed with
+    // SIGSYS, which took the whole fork child down before execve - the
+    // terminal died at ~15ms with no output at all. close() is always allowed.
+    long maxFd = 4096;
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < (rlim_t) maxFd) {
         maxFd = (long) rl.rlim_cur;
     }
-    for (long fd = 3; fd < maxFd; fd++) {
+    for (long fd = maxFd - 1; fd >= 3; fd--) {
         syscall(__NR_close, (int) fd);
     }
 }

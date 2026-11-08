@@ -45,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -131,11 +132,31 @@ object VoiceModePrefs {
 
     private const val PREFS = "voice_prefs"
     private const val KEY_EXPANDED = "voice.panel.expanded"
+    private const val KEY_AUTO_SEND = "voice.panel.autoSend"
 
     /** Set once from [init]; without it [expanded] can't reach SharedPreferences. */
     private var appContext: android.content.Context? = null
 
     var isVoiceActive by mutableStateOf(false)
+
+    /**
+     * [T-android-voice-auto-send] Send the transcript as soon as the engine
+     * finalises it, without waiting for a Send tap.
+     *
+     * Defaults to ON because press-and-hold already removes the ambiguity the
+     * tap used to resolve: the release IS the end of the utterance. Kept as a
+     * switch anyway — auto-send with no way back is a trap, one misheard word
+     * would be out before the user could react.
+     */
+    private var autoSendState by mutableStateOf(true)
+
+    var autoSend: Boolean
+        get() = autoSendState
+        set(value) {
+            autoSendState = value
+            appContext?.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+                ?.edit()?.putBoolean(KEY_AUTO_SEND, value)?.apply()
+        }
 
     private var expandedState by mutableStateOf(true)
 
@@ -165,6 +186,8 @@ object VoiceModePrefs {
         appContext = ctx
         expandedState = ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
             .getBoolean(KEY_EXPANDED, true)
+        autoSendState = ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+            .getBoolean(KEY_AUTO_SEND, true)
     }
 }
 
@@ -172,6 +195,20 @@ private val CompactHeight = 92.dp
 private val ExpandedBase = 168.dp
 private val CompactMic = 60.dp
 private val ExpandedMic = 72.dp
+
+/**
+ * [T-android-voice-press-to-talk] Which role a mic press plays.
+ *
+ * The mic used to be a toggle — tap to start, tap again to stop — and between
+ * the two taps the VAD had to wait out its trailing-silence window
+ * (END_FRAMES = 156, ≈5 s) before it closed a segment. A dictation that simply
+ * ended sat in silence for five seconds before anything was transcribed.
+ *
+ * Holding the button makes the RELEASE the stop signal.
+ * ProviderSpeechRecognitionEngine.stop() flushes the still-open segment and
+ * transcribes it right away, so the silence window never runs at all.
+ */
+private enum class MicPressMode { NONE, RECORD, CANCEL }
 
 @Composable
 internal fun InlineVoiceInputPanel(
@@ -208,6 +245,10 @@ internal fun InlineVoiceInputPanel(
     contextUsageHint: com.openminis.app.ui.chat.ContextUsageHint? = null,
     /** [T-android-picker-provider-edit] Open a provider's settings from the voice picker; null hides the button. */
     onEditProvider: ((instanceId: String) -> Unit)? = null,
+    // [T-android-voice-auto-send] Called after a FINAL transcript has been
+    // committed, when auto-send is on. The composer owns sending, so the panel
+    // does not send by itself — it only reports "the text is ready".
+    onAutoSend: (() -> Unit)? = null,
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val sttState by SpeechRecognitionManager.state.collectAsState()
@@ -297,7 +338,9 @@ internal fun InlineVoiceInputPanel(
     val config by providerRepository.config.collectAsState()
     val choice = remember(config) { providerRepository.resolveVoiceInputChoice() }
     val groupName = remember(config) { providerRepository.voiceInputGroupName() }
-    val modelLabel = if (choice.isSystem) {
+    val modelLabel = if (choice.onDeviceEngineId != null) {
+        stringResource(R.string.voice_on_device_sensevoice)
+    } else if (choice.isSystem) {
         stringResource(
             if (choice.systemPreferOffline == true) R.string.voice_system_recognition_offline
             else R.string.voice_system_recognition_online,
@@ -442,6 +485,24 @@ internal fun InlineVoiceInputPanel(
         captureBase = joined
         setTranscript(joined)
         com.openminis.app.speech.VoicePipelineLog.event("panel.commit", "chars" to joined.length)
+
+        // [T-android-voice-auto-send] The utterance is final — send it.
+        //
+        // With press-and-hold the release already ended the utterance, so
+        // waiting for a Send tap only adds a step the user never asked for.
+        // The send is deferred by a beat so the composer holds the text
+        // before it is asked to send, and it is skipped while a capture is
+        // still running (a segment that closed mid-hold).
+        if (VoiceModePrefs.autoSend && onAutoSend != null) {
+            scope.launch {
+                kotlinx.coroutines.delay(120)
+                if (SpeechRecognitionManager.state.value == RecognitionState.RECORDING) {
+                    com.openminis.app.speech.VoicePipelineLog.event("panel.autosend.skip", "why" to "stillRecording")
+                    return@launch
+                }
+                onAutoSend.invoke()
+            }
+        }
     }
 
     fun onRecognitionError(error: com.openminis.app.speech.RecognitionError, message: String?) {
@@ -473,7 +534,8 @@ internal fun InlineVoiceInputPanel(
     fun startCapture() {
         // Route the engine per the resolved choice (mirrors iOS provider resolve
         // on prepare/refresh).
-        val engineId = if (choice.isSystem) "system" else "provider"
+        val engineId = choice.onDeviceEngineId
+            ?: if (choice.isSystem) "system" else "provider"
         com.openminis.app.speech.VoicePipelineLog.event("panel.start", "engine" to engineId)
         SpeechRecognitionManager.selectEngine(engineId)
         (SpeechRecognitionManager.availableEngines()
@@ -504,35 +566,68 @@ internal fun InlineVoiceInputPanel(
         if (!started) VoiceSendGate.requeue(item)
     }
 
-    fun handleMicTap() {
+    // [T-android-voice-press-to-talk] Which role this press plays. The mic
+    // used to be a toggle — tap to start, tap again to stop — and between the
+    // two taps the VAD had to wait out its trailing-silence window
+    // (END_FRAMES = 156, ≈5 s) before it closed a segment. A dictation that
+    // simply ended sat in silence for five seconds before anything was
+    // transcribed.
+    //
+    // Holding the button makes the RELEASE the stop signal.
+    // ProviderSpeechRecognitionEngine.stop() flushes the still-open segment
+    // and transcribes it right away, so the silence window never runs at all.
+    var micPressMode by remember { mutableStateOf(MicPressMode.NONE) }
+
+    fun handleMicPress() {
         when {
             isTranscribing -> {
                 // Spinner while idle → X cancels the in-flight transcription.
                 // [T-voice-send-busy] Before the cancel: its IDLE must not read
                 // as "recognition finished" to a pending send.
                 VoiceSendGate.abandonFinishForSend("transcription cancelled")
-                com.openminis.app.speech.VoicePipelineLog.event("panel.cancel", "src" to "micTap")
+                com.openminis.app.speech.VoicePipelineLog.event("panel.cancel", "src" to "micPress")
                 SpeechRecognitionManager.cancelRecording()
+                micPressMode = MicPressMode.CANCEL
             }
-            isRecording -> stopCapture()
-            else -> scope.launch {
-                VoiceSendGate.abandonFinishForSend("mic tapped to record again")
-                // Re-check on every tap: a permission granted moments after a
-                // DENIED race (settings-gate cancel) must not dead-end the mic.
-                if (!ensureMicPermission()) {
-                    permissionDenied = true
-                    return@launch
+            else -> {
+                micPressMode = MicPressMode.RECORD
+                scope.launch {
+                    VoiceSendGate.abandonFinishForSend("mic pressed to record")
+                    // Re-check on every press: a permission granted moments
+                    // after a DENIED race (settings-gate cancel) must not
+                    // dead-end the mic.
+                    if (!ensureMicPermission()) {
+                        permissionDenied = true
+                        micPressMode = MicPressMode.NONE
+                        return@launch
+                    }
+                    permissionDenied = false
+                    if (isEditing) leaveEditMode()
+                    startCapture()
+                    // The finger can lift while the permission dialog is up.
+                    // Without this the capture would begin after the release
+                    // and never stop.
+                    if (micPressMode != MicPressMode.RECORD) {
+                        SpeechRecognitionManager.stopRecording()
+                    }
                 }
-                permissionDenied = false
-                if (isEditing) leaveEditMode()
-                startCapture()
             }
+        }
+    }
+
+    fun handleMicRelease() {
+        val mode = micPressMode
+        micPressMode = MicPressMode.NONE
+        if (mode == MicPressMode.RECORD) {
+            stopCapture()
         }
     }
 
     // ── Lifecycle: prepare on mount (default groups + engine warm), stop on exit.
     LaunchedEffect(Unit) {
         providerRepository.ensureDefaultVoiceInputGroup()
+        // 端侧 SenseVoice 可用时把它提到语音输入组首位（幂等）。
+        providerRepository.ensureOnDeviceAsrPreferred()
         providerRepository.ensureDefaultVoiceOutputGroup()
         // [T-android-voice-correction] Load the jieba dictionaries now, while
         // the user is still reaching for the mic. The first segment call costs
@@ -756,7 +851,8 @@ internal fun InlineVoiceInputPanel(
                     groupName = groupName,
                     modelLabel = modelLabel,
                     contextUsageLine = shownUsageHint,
-                    onMicTap = { handleMicTap() },
+                    onMicPress = { handleMicPress() },
+                    onMicRelease = { handleMicRelease() },
                     onTranscriptChange = {
                         VoiceSendGate.abandonFinishForSend("text edited")
                         setTranscript(it)
@@ -778,6 +874,8 @@ internal fun InlineVoiceInputPanel(
                         if (transcript.isNotEmpty()) setTranscript(transcript.dropLast(1))
                     },
                     onOpenSelector = { showModelSelector = true },
+                    autoSend = VoiceModePrefs.autoSend,
+                    onToggleAutoSend = { VoiceModePrefs.autoSend = !VoiceModePrefs.autoSend },
                     asrStalled = asrStalled,
                     onSwitchModel = onSwitchModel,
                 )
@@ -787,7 +885,8 @@ internal fun InlineVoiceInputPanel(
                     isRecording = isRecording,
                     isTranscribing = isTranscribing,
                     levels = levels,
-                    onMicTap = { handleMicTap() },
+                    onMicPress = { handleMicPress() },
+                    onMicRelease = { handleMicRelease() },
                     asrStalled = asrStalled,
                     onSwitchModel = onSwitchModel,
                 )
@@ -866,12 +965,16 @@ private fun ExpandedContent(
     levels: List<Float>,
     groupName: String?,
     modelLabel: String,
-    onMicTap: () -> Unit,
+    onMicPress: () -> Unit,
+    onMicRelease: () -> Unit,
     onTranscriptChange: (String) -> Unit,
     onBeginEdit: () -> Unit,
     onExitEdit: () -> Unit,
     onDeleteLast: () -> Unit,
     onOpenSelector: () -> Unit,
+    // [T-android-voice-auto-send] Auto-send switch state + toggle handler.
+    autoSend: Boolean = true,
+    onToggleAutoSend: () -> Unit = {},
     // [T-android-context-usage-hint] Line currently owning the status row.
     contextUsageLine: com.openminis.app.ui.chat.ContextUsageHint? = null,
     asrStalled: Boolean = false,
@@ -940,6 +1043,24 @@ private fun ExpandedContent(
                         .padding(horizontal = 10.dp, vertical = 3.dp),
                 )
             }
+            // [T-android-voice-auto-send] Auto-send on/off. Press-and-hold
+            // already removes the ambiguity the old tap used to resolve, so
+            // auto-send is the default — but a switch is kept, because
+            // auto-send with no way back is a trap: one misheard word would
+            // be out before the user could react.
+            Spacer(Modifier.width(8.dp))
+            Text(
+                stringResource(
+                    if (autoSend) R.string.voice_auto_send_on else R.string.voice_auto_send_off
+                ),
+                style = MaterialTheme.typography.labelMedium,
+                color = ChatColors.secondaryText,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(ChatColors.secondaryText.copy(alpha = 0.15f))
+                    .clickable { onToggleAutoSend() }
+                    .padding(horizontal = 10.dp, vertical = 3.dp),
+            )
         }
 
         // Transcribe-error pill.
@@ -975,7 +1096,8 @@ private fun ExpandedContent(
                 isTranscribing = isTranscribing,
                 levels = levels,
                 enabled = true,
-                onTap = onMicTap,
+                onPressStart = onMicPress,
+                onPressEnd = onMicRelease,
             )
             // [T-android-voice-asr-stall-skip] The "Switch Model" pill and the
             // transcript delete share the right-hand side and key off the ONE
@@ -1049,7 +1171,8 @@ private fun CompactContent(
     isRecording: Boolean,
     isTranscribing: Boolean,
     levels: List<Float>,
-    onMicTap: () -> Unit,
+    onMicPress: () -> Unit,
+    onMicRelease: () -> Unit,
     asrStalled: Boolean = false,
     onSwitchModel: () -> Unit = {},
 ) {
@@ -1077,7 +1200,8 @@ private fun CompactContent(
                 isTranscribing = isTranscribing,
                 levels = levels,
                 enabled = true,
-                onTap = onMicTap,
+                onPressStart = onMicPress,
+                onPressEnd = onMicRelease,
             )
             androidx.compose.animation.AnimatedVisibility(
                 visible = asrStalled,
@@ -1232,8 +1356,15 @@ private fun MicCircleButton(
     isTranscribing: Boolean,
     levels: List<Float>,
     enabled: Boolean,
-    onTap: () -> Unit,
+    onPressStart: () -> Unit,
+    onPressEnd: () -> Unit,
 ) {
+    // pointerInput is keyed on [enabled] alone, so its lambda would otherwise
+    // keep the callbacks captured by the composition that started it — and
+    // those closures read state (isTranscribing) that changes every frame.
+    // rememberUpdatedState hands the gesture the CURRENT callbacks.
+    val currentOnPressStart by rememberUpdatedState(onPressStart)
+    val currentOnPressEnd by rememberUpdatedState(onPressEnd)
     Box(
         modifier = Modifier
             .size(diameter)
@@ -1244,7 +1375,21 @@ private fun MicCircleButton(
             .micShadowNoOffset(10.dp)
             .background(Color.White, CircleShape)
             .clip(CircleShape)
-            .clickable(enabled = enabled) { onTap() },
+            // [T-android-voice-press-to-talk] Press-and-hold instead of a
+            // toggle. detectTapGestures' onPress fires on the DOWN event and
+            // then suspends inside tryAwaitRelease() until the UP event —
+            // exactly the hold semantic, and the same pattern the delete
+            // button in this file already uses for its repeat.
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(
+                    onPress = {
+                        currentOnPressStart()
+                        tryAwaitRelease()
+                        currentOnPressEnd()
+                    },
+                )
+            },
         contentAlignment = Alignment.Center,
     ) {
         if (isTranscribing) {
@@ -1263,7 +1408,9 @@ private fun MicCircleButton(
             )
             else -> Icon(
                 Icons.Default.Mic,
-                contentDescription = stringResource(R.string.voice_panel_toggle_recording),
+                // [T-android-voice-press-to-talk] The button is no longer a
+                // toggle, so the label must not describe one.
+                contentDescription = stringResource(R.string.voice_panel_hold_to_record),
                 tint = Color.Black,
                 modifier = Modifier.size(26.dp),
             )

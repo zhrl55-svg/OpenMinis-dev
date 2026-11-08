@@ -119,6 +119,7 @@ setup_toolchain() {
     case "$(uname -s)-$(uname -m)" in
         Darwin-*)         host_tag="darwin-x86_64" ;;
         Linux-x86_64)     host_tag="linux-x86_64" ;;
+        MINGW*|MSYS*|CYGWIN*) host_tag="windows-x86_64" ;;
         *)                log_error "Unsupported host: $(uname -s) $(uname -m)" ;;
     esac
 

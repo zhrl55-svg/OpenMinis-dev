@@ -42,6 +42,7 @@ import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Keyboard
 import androidx.compose.material.icons.outlined.StopCircle
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Launch
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.LightMode
@@ -84,6 +85,9 @@ const val KEY_LAUNCH_SESSION = "launch_session"    // 0=Auto, 1=LastSession, 2=N
 // `@AppStorage("keepScreenAwakeDuringTasks")` in ContentView.swift so
 // future cross-platform sync (if it ever lands) reads the same values.
 const val KEY_RETURN_KEY_BEHAVIOR = "returnKeyBehavior"  // Int 0=Newline (default), 1=Send
+// [T-terminal-banner-optin] The terminal's start-up hint line. Default OFF:
+// it is printed over the shell prompt, so the terminal looked broken on open.
+const val KEY_TERMINAL_BANNER = "terminalBanner"  // Boolean, default false
 const val KEY_KEEP_SCREEN_AWAKE = "keepScreenAwakeDuringTasks"  // Boolean, default false
 const val KEY_TOOL_PREVIEW = "tool_preview"        // Boolean, default true
 /**
@@ -287,6 +291,7 @@ fun AppearanceScreen(
     var themeMode by remember { mutableIntStateOf(prefs.getInt(KEY_THEME_MODE, 0)) }
     var launchSession by remember { mutableIntStateOf(prefs.getInt(KEY_LAUNCH_SESSION, 0)) }
     var returnKeyBehavior by remember { mutableIntStateOf(prefs.getInt(KEY_RETURN_KEY_BEHAVIOR, 0)) }
+    var terminalBanner by remember { mutableStateOf(prefs.getBoolean(KEY_TERMINAL_BANNER, false)) }
     var keepScreenAwake by remember { mutableStateOf(prefs.getBoolean(KEY_KEEP_SCREEN_AWAKE, false)) }
     var toolPreview by remember { mutableStateOf(prefs.getBoolean(KEY_TOOL_PREVIEW, true)) }
     var foldTools by remember { mutableStateOf(prefs.getBoolean(KEY_FOLD_TOOLS, FOLD_TOOLS_DEFAULT)) }
@@ -423,6 +428,27 @@ fun AppearanceScreen(
                     showDivider = idx < returnRows.size - 1,
                 )
             }
+        }
+
+        // -- Terminal start-up banner --
+        // The terminal prints one line on open, naming the directories the
+        // agent behind this chat can see. It is opt-in now: the line landed on
+        // the shell prompt, which made a working terminal look broken.
+        SettingsSection(
+            header = stringResource(R.string.appearance_section_terminal),
+            footer = stringResource(R.string.appearance_terminal_banner_footer),
+        ) {
+            SettingsSwitchRow(
+                icon = Icons.Outlined.Terminal,
+                iconColor = tileGreen,
+                title = stringResource(R.string.appearance_terminal_banner_title),
+                checked = terminalBanner,
+                onCheckedChange = {
+                    terminalBanner = it
+                    prefs.edit().putBoolean(KEY_TERMINAL_BANNER, it).apply()
+                },
+                showDivider = false,
+            )
         }
 
         // -- Keep Screen Awake --

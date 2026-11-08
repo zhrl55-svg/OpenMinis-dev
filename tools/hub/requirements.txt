@@ -1,0 +1,2 @@
+websockets>=14
+pillow>=10  # optional: only the screen action needs it

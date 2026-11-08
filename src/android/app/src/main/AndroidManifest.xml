@@ -492,6 +492,16 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <!-- [T-minis-hub] The cross-device link. A foreground service, because
+             the socket dies with the app in the background and EMUI freezes
+             background apps without one. mediaPlayback is the type this app
+             already uses for its agent service: no extra permission, no
+             6-hour cap, and it exists on every API level the app supports. -->
+        <service
+            android:name=".hub.HubService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
         <!-- [T-android-backup-fgs] Keeps a running backup alive in the
              background (progress notification + wake lock). Started by
              BackupRunController, stops itself when the run ends. -->

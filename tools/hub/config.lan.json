@@ -1,0 +1,48 @@
+{
+  "relay": "ws://192.168.2.102:8787/v1/hub",
+  "api_key": "nm_dev",
+
+  "device": {
+    "id": "pc-ausa",
+    "name": "AUSA",
+    "kind": "computer",
+    "root": "hubroot",
+    "remote_control": true
+  },
+
+  "actions": ["info", "files", "file.get", "file.put", "shell", "screen", "notify"],
+
+  "policy": {
+    "default": "ask",
+    "allow_read_only_shell": true,
+    "by_sender": {},
+    "actions": {
+      "info": "bypass",
+      "files": "bypass",
+      "file.get": "bypass",
+      "shell": "ask",
+      "file.put": "ask",
+      "screen": "ask",
+      "notify": "bypass"
+    }
+  },
+
+  "limits": {
+    "file_max": 8388608,
+    "out_max": 200000,
+    "approval_timeout_s": 120,
+    "shell_timeout_s": 120,
+    "max_concurrent_calls": 4,
+    "screen_long_edge": 1600,
+    "screen_jpeg_quality": 80
+  },
+
+  "shell": {
+    "program": "",
+    "args": [],
+    "kill_on_timeout": true,
+    "notify_command": ""
+  },
+
+  "journal": "journal-lan.jsonl"
+}

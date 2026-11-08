@@ -172,3 +172,12 @@ src/android/app/libs/vad/
 # 用 scripts/deploy_sensevoice.sh 推到手机，模型本身的来源写在脚本注释里。
 models/asr-sensevoice/
 
+
+# 本地临时产物 / 交接脚本（不是构建输入，别入库）
+# hub.json 里带中继地址和 key，属于凭据，永远不要提交
+hub.json
+*.bak
+*.bak.*
+zz.txt
+ui2.xml
+.workbuddy/

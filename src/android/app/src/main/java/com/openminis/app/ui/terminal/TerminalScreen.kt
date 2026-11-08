@@ -163,6 +163,25 @@ fun TerminalScreen(
         if (hasHardwareKeyboard) inputController.requestFocus()
     }
 
+    // [T-android-terminal-autofocus] Open the terminal ready to type.
+    //
+    // The note above deliberately stopped auto-focusing so the IME would not
+    // pop up over the output on entry. But it also meant that on a touch-only
+    // phone you had to TAP THE CANVAS before a single character would go
+    // anywhere - which reads as "the terminal is broken": the first attempt
+    // to type did nothing at all. Opening a terminal to type into it is the
+    // common case; reading its output is the rare one, and the accessory
+    // bar's keyboard toggle (and the back gesture) still dismiss the IME.
+    //
+    // One-shot on purpose, and NOT the old 20-tick retry loop: that loop
+    // re-popped the IME after the user had dismissed it with the back
+    // gesture. Now dismissing the keyboard sticks and a second back press
+    // leaves the screen.
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(250)
+        inputController.requestFocus()
+    }
+
     DisposableEffect(Unit) {
         onDispose { terminalSession.stop() }
     }

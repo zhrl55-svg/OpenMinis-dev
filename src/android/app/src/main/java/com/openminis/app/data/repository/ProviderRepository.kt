@@ -2072,6 +2072,26 @@ class ProviderRepository(private val context: Context) {
      * when a valid binding already exists. Mirrors iOS
      * ProviderConfigStore.ensureDefaultVoiceInputGroup.
      */
+    /**
+     * 端侧 ASR 首选迁移：模型文件就位时，把 SenseVoice 哨兵插到已绑定的
+     * Voice Input 组首位（幂等）。只在本地引擎可用时执行，所以没下载模型的
+     * 设备行为不变。
+     */
+    fun ensureOnDeviceAsrPreferred(): Boolean = synchronized(configLock) {
+        if (!com.openminis.app.speech.LocalSenseVoiceEngine.isModelReady(context)) return false
+        ensureConfigLoaded()
+        val config = workingCopy()
+        val gid = config.voiceInputGroupId ?: return false
+        val group = config.modelGroups.find { it.id == gid } ?: return false
+        val memberId = "${SystemVoiceIds.BUILTIN_PROVIDER_ID}/${SystemVoiceIds.SYSTEM_ASR_SENSEVOICE}"
+        if (group.memberEntryIds.firstOrNull() == memberId) return false
+        group.memberEntryIds.remove(memberId)
+        group.memberEntryIds.add(0, memberId)
+        saveConfig(config)
+        android.util.Log.i("ProviderRepo", "[Voice] SenseVoice promoted to first in voice group")
+        return true
+    }
+
     fun ensureDefaultVoiceInputGroup(): String? = synchronized(configLock) {
         ensureConfigLoaded()
         val config = workingCopy()
@@ -2082,6 +2102,7 @@ class ProviderRepository(private val context: Context) {
         val group = ModelGroup(
             name = "Voice Input",
             memberEntryIds = mutableListOf(
+                "$sentinel/${SystemVoiceIds.SYSTEM_ASR_SENSEVOICE}",
                 "$sentinel/${SystemVoiceIds.SYSTEM_ASR_ONLINE}",
                 "$sentinel/${SystemVoiceIds.SYSTEM_ASR_OFFLINE}",
             ),
@@ -2144,18 +2165,29 @@ class ProviderRepository(private val context: Context) {
         /** null → provider-backed; non-null → System engine (true = prefer offline). */
         val systemPreferOffline: Boolean?,
         val entry: Pair<ProviderInstance, ModelEntry>?,
+        /** 非 null → 端侧引擎 id（如 "local:sensevoice"），优先于 System/provider。 */
+        val onDeviceEngineId: String? = null,
     ) {
-        val isSystem: Boolean get() = entry == null
+        val isSystem: Boolean get() = entry == null && onDeviceEngineId == null
     }
 
     fun resolveVoiceInputChoice(): VoiceInputChoice {
         ensureConfigLoaded()
         val config = _config.value
 
-        fun systemChoice(memberId: String): VoiceInputChoice = VoiceInputChoice(
-            systemPreferOffline = memberId.endsWith("/${SystemVoiceIds.SYSTEM_ASR_OFFLINE}"),
-            entry = null,
-        )
+        fun systemChoice(memberId: String): VoiceInputChoice {
+            if (memberId.endsWith("/${SystemVoiceIds.SYSTEM_ASR_SENSEVOICE}")) {
+                return VoiceInputChoice(
+                    systemPreferOffline = null,
+                    entry = null,
+                    onDeviceEngineId = com.openminis.app.speech.LocalSenseVoiceEngine.ENGINE_ID,
+                )
+            }
+            return VoiceInputChoice(
+                systemPreferOffline = memberId.endsWith("/${SystemVoiceIds.SYSTEM_ASR_OFFLINE}"),
+                entry = null,
+            )
+        }
 
         fun providerEntry(memberId: String): Pair<ProviderInstance, ModelEntry>? {
             val entry = config.modelEntries.find { it.id == memberId } ?: return null

@@ -31,6 +31,7 @@ android {
     // Android 16 behavior changes; the Live Updates path is runtime-gated on
     // Build.VERSION.SDK_INT >= 36 (see DynamicIslandSupport / AgentForegroundService).
     compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "com.openminis.app"
@@ -100,6 +101,8 @@ android {
         // Same debug signing key as release, so it installs in place.
         create("perf") {
             initWith(getByName("debug"))
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
             isDebuggable = false
             isProfileable = true
             matchingFallbacks += listOf("debug")
@@ -425,7 +428,12 @@ dependencies {
     // both platforms share one model and one set of thresholds. Carries
     // native .so payloads for ONNX Runtime and the APM — see the abiFilters
     // note in `ndk`; we ship arm64-v8a only.
-    implementation("com.github.helloooideeeeea:RealTimeCutVADLibraryForAndroid:1.0.5@aar")
+    // 端侧 SenseVoice 与 Silero VAD 必须共用同一份 libonnxruntime.so：
+    // JitPack 的 VAD aar 自带 1.20.0，sherpa-onnx 自带 1.28.2，同名 so 只能留一个，
+    // 否则 sherpa 在 JNI 初始化阶段直接失败。这里用抠掉 onnxruntime 的本地副本。
+    implementation(files("libs/vad/vad-1.0.5-no-ort.aar"))
+    // 端侧语音识别（sherpa-onnx v2.0.1）。二进制不进版本库，由 deps/fetch_sherpa.ps1 获取。
+    implementation(files("libs/sherpa/sherpa-onnx.aar"))
 
     // rclone, via its official gomobile binding, for backup destinations
     // (SMB / WebDAV / SFTP / S3 / FTP). Build it with

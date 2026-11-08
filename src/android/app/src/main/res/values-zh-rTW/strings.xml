@@ -656,6 +656,9 @@
     <string name="appearance_return_key_footer">選擇對話輸入框中的 Return 鍵要插入換行還是傳送訊息。實體鍵盤的 Shift+Return 一律插入換行。</string>
     <string name="appearance_return_key_newline">換行</string>
     <string name="appearance_return_key_send">傳送</string>
+    <string name="appearance_section_terminal">終端機</string>
+    <string name="appearance_terminal_banner_title">終端機啟動橫幅</string>
+    <string name="appearance_terminal_banner_footer">開啟終端機時顯示一行提示，說明目前對話中的代理可以看見哪些目錄。預設關閉。</string>
     <string name="appearance_section_keep_awake">保持螢幕開啟</string>
     <string name="appearance_keep_awake_footer">在任一工作階段執行工作時，防止螢幕進入休眠。可能會增加耗電。</string>
     <string name="appearance_keep_awake_title">保持螢幕開啟</string>
@@ -1342,6 +1345,10 @@
     <string name="add_models_to_group_all_in_group">所有模型都已在這個群組裡。</string>
     <string name="add_models_to_group_no_match">沒有符合的模型。</string>
     <string name="chat_longpress_edit">編輯</string>
+    <string name="chat_queued_edit">修改排隊訊息</string>
+    <string name="chat_queued_edit_title">修改排隊訊息</string>
+    <string name="chat_queued_edit_hint">這則訊息還在排隊，尚未送出。修改後會在原位置送出。</string>
+    <string name="chat_queued_edit_placeholder">訊息內容</string>
     <string name="chat_longpress_delete_from_here">從此處刪除</string>
     <string name="chat_delete_from_here_confirm">刪除</string>
     <plurals name="chat_delete_from_here_dialog_body">
@@ -1713,6 +1720,11 @@
     <string name="voice_panel_buffered_chars">… %1$d 字 …</string>
     <string name="voice_panel_cancel_transcription">取消轉寫</string>
     <string name="voice_panel_toggle_recording">開始/停止錄音</string>
+    <!-- [T-android-voice-press-to-talk] 麥克風改成「按住說話」，不再是開關。 -->
+    <string name="voice_panel_hold_to_record">按住說話</string>
+    <!-- [T-android-voice-auto-send] 語音面板狀態列上的自動發送開關。 -->
+    <string name="voice_auto_send_on">自動發送：開</string>
+    <string name="voice_auto_send_off">自動發送：關</string>
     <string name="voice_panel_delete">刪除語音文字</string>
     <string name="voice_panel_read_replies">朗讀回覆</string>
     <string name="read_aloud_volume">朗讀音量</string>
@@ -1720,6 +1732,7 @@
     <string name="tts_capsule_system_engine">系統 TTS</string>
     <string name="voice_system_tts_subtitle">Android 內建語音合成</string>
     <string name="voice_system_recognition_online">系統辨識（線上）</string>
+    <string name="voice_on_device_sensevoice">SenseVoice（端側）</string>
     <string name="voice_system_recognition_offline">系統辨識（離線）</string>
     <string name="voice_system_online_subtitle">Android 內建，需要網路</string>
     <string name="voice_system_offline_subtitle">Android 內建，可離線使用</string>

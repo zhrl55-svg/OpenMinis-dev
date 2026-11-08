@@ -40,6 +40,21 @@ object SystemVoiceEntries {
         uuid = "${SystemVoiceIds.BUILTIN_PROVIDER_ID}/${SystemVoiceIds.SYSTEM_ASR_OFFLINE}",
     )
 
+    /** On-device SenseVoice (sherpa-onnx). Model lives in the app's external
+     *  files dir; no network, no rate limits. Resolved by
+     *  SpeechRecognitionManager to LocalSenseVoiceEngine. */
+    val asrSensevoice = ModelEntry(
+        providerInstanceId = SystemVoiceIds.BUILTIN_PROVIDER_ID,
+        baseModel = LLMModel(
+            id = SystemVoiceIds.SYSTEM_ASR_SENSEVOICE,
+            displayName = "SenseVoice (On-device)",
+            provider = "system",
+            inputModalities = listOf("audio"),
+        ),
+        isHidden = true,
+        uuid = "${SystemVoiceIds.BUILTIN_PROVIDER_ID}/${SystemVoiceIds.SYSTEM_ASR_SENSEVOICE}",
+    )
+
     /** System TTS — best installed voice per reply language. */
     val tts = ModelEntry(
         providerInstanceId = SystemVoiceIds.BUILTIN_PROVIDER_ID,
@@ -53,7 +68,7 @@ object SystemVoiceEntries {
         uuid = "${SystemVoiceIds.BUILTIN_PROVIDER_ID}/${SystemVoiceIds.SYSTEM_TTS}",
     )
 
-    val all: List<ModelEntry> = listOf(asrOnline, asrOffline, tts)
+    val all: List<ModelEntry> = listOf(asrOnline, asrOffline, asrSensevoice, tts)
 
     /** Resolve a group member id to a virtual system entry, or null. */
     fun resolve(memberId: String): ModelEntry? = all.find { it.id == memberId }

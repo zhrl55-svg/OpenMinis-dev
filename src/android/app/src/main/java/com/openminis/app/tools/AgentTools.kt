@@ -50,6 +50,14 @@ object AgentTools {
         // not a sub agent, an interactive run). Not in the list = does not
         // exist: no schema, no prompt line, no retries on it. Last, as on iOS.
         userAskExposed: Boolean = false,
+        // [T-minis-hub] The cross-device tool (contract M4). Off until a
+        // relay is configured: the caller gates it on
+        // `Hub.hasCredentials`, so a phone without a relay never shows it.
+        hubEnabled: Boolean = false,
+        // The device names are rebuilt on every schema build (this list is
+        // not cached), so the enum can never advertise a device that went
+        // offline.
+        hubDeviceNames: List<String> = emptyList(),
     ): List<AgentToolDefinition> = buildList {
         add(shellExecuteDefinition())
         add(FileReadTool.definition())
@@ -59,6 +67,7 @@ object AgentTools {
             add(ReadImageTool.definition())
         }
         if (browserEnabled) add(browserUseDefinition())
+        if (hubEnabled) add(com.openminis.app.hub.HubCallTool.definition(hubDeviceNames))
         if (memoryEnabled) {
             if (!isHelper) add(memoryWriteDefinition())
             add(memoryGetDefinition())

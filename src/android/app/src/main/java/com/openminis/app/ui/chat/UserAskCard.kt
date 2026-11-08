@@ -226,6 +226,41 @@ internal fun UserAskBlock(block: AssistantBlock, fallback: @Composable () -> Uni
     }
 }
 
+/**
+ * [T-minis-hub] The approval card for a `hub_call` block.
+ *
+ * Same cards as a user_ask block, but this request was never a question in the
+ * transcript: it arrives mid-call, from the other device, after the call has
+ * already started. So it renders only while there IS a live ask — a hub_call
+ * that never needed approval keeps its ordinary tool pill instead of showing
+ * "waiting for an answer" for the whole time it runs.
+ *
+ * Without this the card existed only in `UserAskCenter` and nothing rendered
+ * it: the person stared at the chat while the call timed out to "denied".
+ */
+@Composable
+internal fun HubApprovalBlock(block: AssistantBlock, fallback: @Composable () -> Unit) {
+    val asks by UserAskCenter.asks.collectAsState()
+    val live = asks.values.firstOrNull { it.toolCallId == block.id }
+    if (live == null) {
+        fallback()
+        return
+    }
+    val t = UserAskTypography.forScale(LocalMarkdownFontScale.current)
+    if (live.state == com.openminis.app.agent.userask.UserAskState.PENDING) {
+        UserAskPendingCard(live, t)
+    } else {
+        UserAskResolvedCard(
+            block.id,
+            live.questions,
+            UserAskResolver.parseResults(live.resultJson),
+            live.source,
+            live.dismissReason,
+            t,
+        )
+    }
+}
+
 @Composable
 private fun UserAskWaiting(t: UserAskTypography) {
     val tint = UserAskTint.question

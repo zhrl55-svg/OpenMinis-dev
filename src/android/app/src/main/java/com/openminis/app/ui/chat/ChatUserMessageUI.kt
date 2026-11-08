@@ -300,6 +300,10 @@ internal fun UserMessageBubble(
     // action — same streaming gate as Retry/Edit/Delete From Here.
     onCompactAbove: (() -> Unit)? = null,
     onWithdraw: (() -> Unit)? = null,
+    // [T-android-queued-message-edit] Rewrite the queued prompt before it is
+    // delivered. Null hides both affordances (the pencil beside the bubble and
+    // the long-press entry) — a machine-authored prompt is not editable.
+    onEditQueued: (() -> Unit)? = null,
     onPreviewFile: (Uri, String) -> Unit = { _, _ -> },
     // [T-multi-select-share] Opens the share picker with this message's round
     // selected. Null hides the action.
@@ -422,9 +426,10 @@ internal fun UserMessageBubble(
                             // IconButton sibling. Without weight(1f, fill=false)
                             // a wide bubble would consume the full 80% width
                             // cap and squeeze the cancel button off-screen.
-                            val bubbleModifier = if (isQueued && onWithdraw != null) {
-                                Modifier.weight(1f, fill = false)
-                            } else Modifier
+                            val bubbleModifier =
+                                if (isQueued && (onWithdraw != null || onEditQueued != null)) {
+                                    Modifier.weight(1f, fill = false)
+                                } else Modifier
                             // T-android-gc-storm-issue17: long user messages (rare,
                             // but legacy sessions can carry pasted log dumps) blow
                             // up text layout the same way large assistant content
@@ -444,6 +449,26 @@ internal fun UserMessageBubble(
                                         .clip(shape)
                                         .then(dashedStroke)
                                         .padding(horizontal = 14.dp, vertical = 8.dp),
+                                )
+                            }
+                        }
+                        // [T-android-queued-message-edit] Pencil to the left of
+                        // the withdraw target: a queued message is the one
+                        // bubble whose content the user can still change
+                        // without touching history, and hunting for it behind
+                        // a long-press on a dashed bubble was not discoverable.
+                        // Same 44dp ring as withdraw so the pair reads as one
+                        // action group and both stay IME-thumb friendly.
+                        if (isQueued && onEditQueued != null) {
+                            IconButton(
+                                onClick = onEditQueued,
+                                modifier = Modifier.size(44.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = stringResource(R.string.chat_queued_edit),
+                                    tint = ChatColors.secondaryText,
+                                    modifier = Modifier.size(22.dp),
                                 )
                             }
                         }
@@ -518,6 +543,17 @@ internal fun UserMessageBubble(
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.chat_longpress_edit)) },
                         onClick = { showMenu = false; onEdit() },
+                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                    )
+                }
+                // [T-android-queued-message-edit] Queued bubbles get their own
+                // Edit: the ordinary one truncates history to this turn, which
+                // a queued message has not reached yet. This one rewrites the
+                // pending prompt instead and leaves history untouched.
+                if (onEditQueued != null) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.chat_queued_edit)) },
+                        onClick = { showMenu = false; onEditQueued() },
                         leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) },
                     )
                 }
@@ -596,6 +632,99 @@ internal fun UserMessageBubble(
             }
         }
     }
+    }
+}
+
+// ─── Queued message editor ──────────────────────────────────────────────────
+
+/**
+ * [T-android-queued-message-edit] In-place editor for a message that is still
+ * sitting on the prompt queue.
+ *
+ * Deliberately a dialog and not a composer round-trip: the composer's send path
+ * treats a submit during a running turn as a NEW queued prompt, so pulling the
+ * text back into it would leave the original queue entry behind (two bubbles,
+ * two deliveries). Editing here rewrites the single pending entry and the
+ * bubble keeps its place in the queue.
+ */
+@Composable
+internal fun QueuedMessageEditDialog(
+    initialText: String,
+    /** True when the prompt carries attachments, so blank text is deliverable. */
+    canBeBlank: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var text by remember(initialText) { mutableStateOf(initialText) }
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        keyboard?.show()
+    }
+    val canSave = text.isNotBlank() || canBeBlank
+
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+        ),
+    ) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+        ) {
+            Column(modifier = Modifier.fillMaxWidth().padding(24.dp)) {
+                Text(
+                    text = stringResource(R.string.chat_queued_edit_title),
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = stringResource(R.string.chat_queued_edit_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .heightIn(min = 96.dp, max = 260.dp),
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
+                    // Capped rather than unbounded: a pasted log dump should
+                    // scroll inside the field, not push the buttons off-screen.
+                    maxLines = 10,
+                    placeholder = {
+                        Text(
+                            text = stringResource(R.string.chat_queued_edit_placeholder),
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
+                        )
+                    },
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    MinisTextButton(onClick = onDismiss) {
+                        Text(stringResource(R.string.cancel))
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    MinisTextButton(
+                        onClick = { onSave(text) },
+                        enabled = canSave,
+                    ) {
+                        Text(stringResource(R.string.save))
+                    }
+                }
+            }
+        }
     }
 }
 
