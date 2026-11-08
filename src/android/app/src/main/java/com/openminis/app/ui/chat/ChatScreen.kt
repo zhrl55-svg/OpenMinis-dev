@@ -7950,28 +7950,25 @@ fun ChatScreen(
                                         // preceded the tool call is spoken
                                         // BEFORE the announcement, not after it.
                                         replyTts.flush()
-                                        // [T-android-tts-tool-announce] Announce
-                                        // each newly-started tool, mirroring iOS
-                                        // (makeToolSpeech + speakQueued). Without
-                                        // this a listener hears the narration stop
-                                        // dead for however long the tool runs,
-                                        // with no cue as to why — the screen shows
-                                        // a pill, but the whole point of read-aloud
-                                        // is not having to look.
+                                        // [T-android-tts-tool-announce-off]
+                                        // 2026-11-08: the per-tool announcement
+                                        // ("Running: ...", "Executing script: ...")
+                                        // is NOT spoken any more.
                                         //
-                                        // Queued, never speak(): that would stop
-                                        // playback and cut off the sentence just
-                                        // flushed above.
-                                        for (i in lastToolCount until toolCount) {
-                                            val b = toolBlocks.getOrNull(i) ?: continue
-                                            replyTts.speakQueued(
-                                                com.openminis.app.speech.ToolSpeech.announcement(
-                                                    name = b.toolName,
-                                                    argsJson = b.toolArgs,
-                                                    title = b.toolTitle.takeIf { it.isNotBlank() },
-                                                )
-                                            )
-                                        }
+                                        // It used to be queued here (T-android-tts-
+                                        // tool-announce, an iOS port) so a listener
+                                        // would not sit in silence while a tool ran.
+                                        // But the announcement carries the TOOL's
+                                        // state, not the reply's prose: users asked
+                                        // for read-aloud to read the REPLY BODY and
+                                        // nothing else — hearing "Running:
+                                        // seeking", "Running: shell_execute" etc.
+                                        // between sentences is noise, not narration.
+                                        //
+                                        // The flush() above is KEPT: the half
+                                        // sentence that preceded the tool call must
+                                        // still be spoken BEFORE the tool runs, or it
+                                        // would sit buffered until stream end.
                                         lastToolCount = toolCount
                                     }
                                     // Turn end drains the side-channel AFTER
