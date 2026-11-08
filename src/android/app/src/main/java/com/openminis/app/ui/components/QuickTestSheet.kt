@@ -595,10 +595,12 @@ private suspend fun synthesizeTestClip(context: android.content.Context, text: S
                     runCatching { tts?.shutdown() }
                     if (cont.isActive) cont.resumeWith(Result.success(ok))
                 }
-                tts = android.speech.tts.TextToSpeech(context) { status ->
+                // 引擎显式绑定，和正式播报一致（见 TtsEngineResolver）
+                val ttsEngine = com.openminis.app.speech.TtsEngineResolver.resolve(context)
+                val onInit = android.speech.tts.TextToSpeech.OnInitListener { status ->
                     if (status != android.speech.tts.TextToSpeech.SUCCESS) {
                         finish(false)
-                        return@TextToSpeech
+                        return@OnInitListener
                     }
                     tts?.language = java.util.Locale.US
                     tts?.setOnUtteranceProgressListener(
@@ -612,6 +614,11 @@ private suspend fun synthesizeTestClip(context: android.content.Context, text: S
                     )
                     val result = tts?.synthesizeToFile(text, android.os.Bundle(), file, "quicktest-clip")
                     if (result != android.speech.tts.TextToSpeech.SUCCESS) finish(false)
+                }
+                tts = if (ttsEngine != null) {
+                    android.speech.tts.TextToSpeech(context, onInit, ttsEngine)
+                } else {
+                    android.speech.tts.TextToSpeech(context, onInit)
                 }
                 cont.invokeOnCancellation { runCatching { tts?.shutdown() } }
             }

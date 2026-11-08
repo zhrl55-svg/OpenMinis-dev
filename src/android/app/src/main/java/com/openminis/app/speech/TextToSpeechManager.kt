@@ -52,6 +52,15 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
     private var appContext: Context? = null
 
     /**
+     * 本次实例显式绑定的引擎包名（null = 交给系统默认）。
+     *
+     * 只用于 init 失败时判断「是不是我指定的那个起不来」，起不来就退回系统默认
+     * 再试一次 —— 见 [onInit]。之后置 null，避免反复重试。
+     */
+    @Volatile
+    private var preferredEngine: String? = null
+
+    /**
      * [T-android-tts-locale GH#324] Set when a caller picked the language
      * explicitly via [setLanguage] — today `android-speak --voice <tag>`.
      *
@@ -142,7 +151,16 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
         // previously kept no Context at all, which is part of why the language
         // decision could only ever look at the text's script.
         appContext = context.applicationContext
-        tts = TextToSpeech(context.applicationContext, this)
+        // [T-android-tts-engine-explicit] 不再把引擎交给系统猜。
+        // 华为机上的 tts_default_synth 指向没安装的 com.svox.pico，
+        // 详情与取舍见 TtsEngineResolver 的注释。
+        val engine = TtsEngineResolver.resolve(context.applicationContext)
+        preferredEngine = engine
+        tts = if (engine != null) {
+            TextToSpeech(context.applicationContext, this, engine)
+        } else {
+            TextToSpeech(context.applicationContext, this)
+        }
     }
 
     /**
@@ -206,6 +224,19 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
                     }
                 }
             }
+        } else if (preferredEngine != null && appContext != null) {
+            // [T-android-tts-engine-explicit] 显式指定的引擎起不来（被冻结、
+            // 用户停用、或 OEM 改了服务名），退回系统默认再试一次。
+            // 只退一次：重试时 preferredEngine 已置 null，再失败就走下面的
+            // initFailed 分支，不会无限重建。
+            val failed = preferredEngine
+            preferredEngine = null
+            Log.w(TAG, "TTS engine $failed failed to init (status=$status); retrying with system default")
+            runCatching { tts?.shutdown() }
+            tts = null
+            isInitialized = false
+            tts = TextToSpeech(appContext!!, this)
+            return
         } else {
             initFailed = true
             synchronized(queueLock) { preInitQueue.clear() }

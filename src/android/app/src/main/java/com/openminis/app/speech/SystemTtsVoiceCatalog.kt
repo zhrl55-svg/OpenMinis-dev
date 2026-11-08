@@ -65,8 +65,17 @@ object SystemTtsVoiceCatalog {
     private suspend fun enumerate(context: Context): List<SystemVoice> {
         val ready = CompletableDeferred<Boolean>()
         var tts: TextToSpeech? = null
-        tts = TextToSpeech(context) { status ->
+        // 和 TextToSpeechManager 绑同一个引擎：否则「音色列表」是 A 引擎的，
+        // 实际播报走 B 引擎，用户选了没用（华为机上 tts_default_synth
+        // 指向没安装的 com.svox.pico 时尤其明显）。
+        val engine = TtsEngineResolver.resolve(context)
+        val initListener = TextToSpeech.OnInitListener { status ->
             ready.complete(status == TextToSpeech.SUCCESS)
+        }
+        tts = if (engine != null) {
+            TextToSpeech(context, initListener, engine)
+        } else {
+            TextToSpeech(context, initListener)
         }
         val ok = kotlinx.coroutines.withTimeoutOrNull(INIT_TIMEOUT_MS) { ready.await() } ?: false
         val raw: Set<Voice> = if (ok) {

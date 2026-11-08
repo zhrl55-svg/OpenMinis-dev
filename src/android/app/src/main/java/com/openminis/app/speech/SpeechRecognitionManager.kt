@@ -3,6 +3,7 @@ package com.openminis.app.speech
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.openminis.app.logging.AppLogger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,6 +28,7 @@ object SpeechRecognitionManager {
     private const val TAG = "SpeechManager"
     private const val PREFS = "speech_recognition"
     private const val KEY_ENGINE_ID = "engineId"
+    private const val KEY_LOCAL_PREFERRED = "localSenseVoicePreferred"
     private const val KEY_LOCALE = "locale"
 
     private lateinit var appContext: Context
@@ -171,10 +173,22 @@ object SpeechRecognitionManager {
         prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
         engines.clear()
+        // 端侧 SenseVoice：进程内 JNI，模型缺失时 isAvailable=false，自动回退
+        engines.add(LocalSenseVoiceEngine(appContext))
         engines.add(SystemSpeechRecognitionEngine(appContext))
         engines.add(ProviderSpeechRecognitionEngine(appContext))
 
         _selectedEngineId.value = prefs.getString(KEY_ENGINE_ID, null) ?: pickDefaultEngineId()
+
+        // 端侧 SenseVoice 一旦就绪就设为首选（只迁移一次，之后尊重用户在语音设置里的选择）。
+        if (!prefs.getBoolean(KEY_LOCAL_PREFERRED, false)) {
+            val localEngine = engines.firstOrNull { it.id == LocalSenseVoiceEngine.ENGINE_ID }
+            if (localEngine != null && localEngine.isAvailable) {
+                prefs.edit().putBoolean(KEY_LOCAL_PREFERRED, true).apply()
+                selectEngine(localEngine.id)
+                AppLogger.info("LocalAsr", "端侧 SenseVoice 就绪，已设为默认识别引擎")
+            }
+        }
         prefs.getString(KEY_LOCALE, null)?.let { tag ->
             runCatching { _locale.value = Locale.forLanguageTag(tag) }
         }

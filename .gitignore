@@ -163,3 +163,12 @@ src/android/app/libs/rclone.aar
 deps/aot/*.S
 deps/aot/.build/
 deps/aot/.build-iphonesimulator/
+# 端侧语音模型的预编译 AAR（体积大，按需 fetch，不入库）
+src/android/app/libs/sherpa/
+# 端侧语音模型的预编译 AAR（体积大，按需 fetch，不入库）
+src/android/app/libs/vad/
+
+# 端侧识别模型（SenseVoice-Small int8，约 229MB + 309KB 词表）。不入库：
+# 用 scripts/deploy_sensevoice.sh 推到手机，模型本身的来源写在脚本注释里。
+models/asr-sensevoice/
+

@@ -11,6 +11,7 @@ import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import com.openminis.app.speech.TextToSpeechManager
+import com.openminis.app.speech.TtsEngineResolver
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -161,7 +162,15 @@ class SpeakOffloadHandler(private val context: Context) : NativeOffloadHandler {
         val items = JSONArray()
         // Pull voices through a fresh probe — the long-lived
         // [TextToSpeechManager] doesn't expose them, and a probe is cheap.
-        val probe = TextToSpeech(context.applicationContext, null)
+        //
+        // 引擎要和实际播报的那个一致，否则 `android-speak voices` 列的是 A 引擎的
+        // 音色、speak 走的是 B，模型照着列表选 voice 会选到不存在的名字。
+        val probeEngine = TtsEngineResolver.resolve(context.applicationContext)
+        val probe = if (probeEngine != null) {
+            TextToSpeech(context.applicationContext, null, probeEngine)
+        } else {
+            TextToSpeech(context.applicationContext, null)
+        }
         try {
             // Voices are enumerable as soon as the engine is installed; a
             // 200ms post-construction settle is enough on every device I've
