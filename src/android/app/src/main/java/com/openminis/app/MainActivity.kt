@@ -776,16 +776,13 @@ class MainActivity : ComponentActivity() {
                 )
                 nav.navigate(Routes.chat(action.sessionId))
             }
-            // App-icon quick actions (mirrors iOS QuickActionRouter). All
-            // three open a fresh draft chat; voice/camera additionally seed
-            // DeepLinkCoordinator.pendingChatAction so ChatScreen auto-fires
-            // the corresponding UI on first compose.
+            // App-icon quick actions (mirrors iOS QuickActionRouter). Both open
+            // a fresh draft chat; camera additionally seeds
+            // DeepLinkCoordinator.pendingChatAction so ChatScreen opens the
+            // attachment picker on first compose.
             is DeepLinkAction.NewChat,
-            is DeepLinkAction.NewVoiceChat,
             is DeepLinkAction.NewCameraChat -> {
                 when (action) {
-                    is DeepLinkAction.NewVoiceChat -> DeepLinkCoordinator
-                        .setPendingChatAction(DeepLinkCoordinator.ChatAction.START_VOICE)
                     is DeepLinkAction.NewCameraChat -> DeepLinkCoordinator
                         .setPendingChatAction(DeepLinkCoordinator.ChatAction.OPEN_CAMERA)
                     else -> {}
@@ -809,6 +806,33 @@ class MainActivity : ComponentActivity() {
                 } catch (_: android.content.ActivityNotFoundException) {
                     AppLogger.warning("DeepLink", "OpenAlarmList: no Clock app handles SHOW_ALARMS")
                 }
+            }
+            is DeepLinkAction.RunLocalLlm -> {
+                // [T-mnn-local] 端侧模型探针。跑在后台线程，不碰 UI：
+                // 结果只写日志（tag LocalLlmProbe），adb logcat 就能看到。
+                val prompt = action.prompt
+                Thread({
+                    val result = com.openminis.app.llm.mnn.LocalLlmProbe.runBlocking(this, prompt)
+                    com.openminis.app.llm.mnn.LocalLlmProbe.logResult(result)
+                    com.openminis.app.llm.mnn.LocalLlmProbe.writeReport(this, result, prompt)
+                }, "local-llm-probe").start()
+            }
+            is DeepLinkAction.SetAssistantMode -> {
+                // [T-mnn-local] 助理模式开关。默认关；这里把它做成一条 deep-link，
+                // 是为了「出问题一条命令关掉」，不用进设置翻。
+                com.openminis.app.llm.mnn.AssistantFastPath.setEnabled(this, action.on)
+                com.openminis.app.logging.AppLogger.info(
+                    "AssistantMode", "assistant fast path enabled=${action.on}",
+                )
+            }
+            is DeepLinkAction.RunLocalIntent -> {
+                // [T-mnn-local] 端侧意图规划验收：跑一批用例，出准确率报告。
+                Thread({
+                    val report = com.openminis.app.llm.mnn.LocalIntentProbe.runBlocking(this)
+                    com.openminis.app.logging.AppLogger.info(
+                        "LocalIntentProbe", report.replace('\n', ' ').take(500),
+                    )
+                }, "local-intent-probe").start()
             }
             else -> {}
         }

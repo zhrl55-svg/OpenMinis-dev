@@ -26,6 +26,7 @@ import com.openminis.app.config.readable.ReadableThinkingLabels
 import com.openminis.app.data.repository.BackgroundSettingsRepository
 import com.openminis.app.data.repository.ChatRepository
 import com.openminis.app.sandbox.ContainerDns
+import com.openminis.app.speech.wake.WakeWordSettings
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.model.ThinkingLevel
@@ -65,6 +66,7 @@ internal object ConfigBuiltins {
         registerAgentTools(r, context)
         registerSpeech(r, context)
         registerScheduled(r, context)
+        registerAssistant(r, context)
         registerUpdates(r, context)
         registerBackup(r, context)
         registerFiles(r, context)
@@ -226,6 +228,30 @@ internal object ConfigBuiltins {
                     val b = (v as? ConfigValue.Bool)?.value ?: throw ConfigError.TypeMismatch("bool")
                     store.setShowHomeBadge(b)
                 },
+            )
+        )
+    }
+
+    /**
+     * `assistant.localMode` - 助理模式（端侧直连）。
+     *
+     * 打开后，用户那句话如果能被**规则**圈到一个工具、**端侧模型**又把参数抽全，
+     * 就在手机上直接执行，不问云端。抽不出、抽错、命令危险 —— 一律照旧走云端。
+     *
+     * 默认关闭：端侧是加速器，不是主链路。
+     */
+    private fun registerAssistant(r: ConfigRegistry, context: Context) {
+        r.register(
+            PrefsBoolField(
+                path = "assistant.localMode",
+                displayName = "On-device assistant mode",
+                description = "Let a short, explicit instruction run on the phone itself: the app picks the tool with a rule, the on-device model fills in the arguments, and the tool runs locally — no cloud round-trip. Anything the rule does not recognise, the model cannot fill in, or that touches a destructive command falls back to the cloud model as usual. Default off.",
+                prefs = context.applicationContext.getSharedPreferences(
+                    com.openminis.app.llm.mnn.LocalAssistantPrefs.PREFS_NAME,
+                    Context.MODE_PRIVATE,
+                ),
+                key = com.openminis.app.llm.mnn.LocalAssistantPrefs.KEY_ENABLED,
+                defaultValue = false,
             )
         )
     }
@@ -933,6 +959,44 @@ internal object ConfigBuiltins {
                     "15m" to "15 minutes before", "always" to "Whole wait",
                 ),
                 defaultIndex = BackgroundSettingsRepository.DEFAULT_SCHEDULED_COUNTDOWN_LEAD,
+            )
+        )
+
+        // [T-android-voice-wake] Background wake-word listening. The settings
+        // screen and WakeWordController read the same prefs file; the
+        // controller's listener reacts to writes from here too.
+        val wakePrefs = context.getSharedPreferences(WakeWordSettings.PREFS_NAME, Context.MODE_PRIVATE)
+        r.register(
+            PrefsBoolField(
+                path = "voice.wake",
+                displayName = "Background voice wake",
+                description = "Listen for the wake word while the app is in the background (microphone foreground service).",
+                prefs = wakePrefs,
+                key = WakeWordSettings.KEY_ENABLED,
+                defaultValue = false,
+                risk = ConfigRisk.SENSITIVE,
+            )
+        )
+        r.register(
+            PrefsStringField(
+                path = "voice.wakeWord",
+                displayName = "Wake word",
+                description = "Up to four Chinese wake words separated by commas.",
+                prefs = wakePrefs,
+                key = WakeWordSettings.KEY_WAKE_WORD,
+                defaultValue = WakeWordSettings.DEFAULT_WAKE_WORD,
+                maxLength = 64,
+                readable = ConfigReadable(ConfigValueFormatter.Text()),
+            )
+        )
+        r.register(
+            PrefsBoolField(
+                path = "voice.wakeOverlay",
+                displayName = "Voice status floating ball",
+                description = "Show the wake listener state in a floating ball while the app is in the background.",
+                prefs = wakePrefs,
+                key = WakeWordSettings.KEY_OVERLAY_ENABLED,
+                defaultValue = true,
             )
         )
     }

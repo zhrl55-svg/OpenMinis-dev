@@ -199,7 +199,18 @@ object Routes {
     /** [T-config-readable] Logs → Config Changes → one record. */
     const val CONFIG_AUDIT_DETAIL = "config_audit_detail/{auditId}"
     const val APPEARANCE = "appearance"
-    const val BACKGROUND = "background"
+    /**
+     * Background & notifications settings.
+     *
+     * `voice=1` scrolls straight to the voice-wake section — the main
+     * settings screen links there directly, because the wake word used to
+     * be buried under the battery rows.
+     */
+    const val BACKGROUND = "background?voice={voice}"
+
+    /** [Routes.BACKGROUND], optionally scrolled to the voice-wake section. */
+    fun background(voiceWake: Boolean = false): String =
+        if (voiceWake) "background?voice=1" else "background"
     const val ABOUT = "about"
     const val ONBOARDING_MODELS = "onboarding_models"
     /** T219-2: Mount external folders settings + detail. */
@@ -322,12 +333,11 @@ fun AppNavigation(
             // (see below) so the NavHost mounts directly into the right
             // chat — no safeNavigate dance, no sessions-list flash.
             is DeepLinkAction.OpenHtmlPreview -> {}
-            // App-icon quick actions: all three open a fresh draft chat.
-            // Voice/camera additionally seed DeepLinkCoordinator.pendingChatAction
-            // (done up-front in startDestination block below so the seed
-            // lands before ChatScreen's first compose).
+            // App-icon quick actions: both open a fresh draft chat. Camera
+            // additionally seeds DeepLinkCoordinator.pendingChatAction (done
+            // up-front in the startDestination block below so the seed lands
+            // before ChatScreen's first compose).
             is DeepLinkAction.NewChat,
-            is DeepLinkAction.NewVoiceChat,
             is DeepLinkAction.NewCameraChat -> {
                 // Navigation handled by startDestination = chat/<__new__…>
                 // when the launch intent carries one of these actions.
@@ -521,12 +531,6 @@ fun AppNavigation(
     // its first LaunchedEffect tick. Mirrors the htmlShortcut path —
     // avoids a sessions-list flash and a duplicate back-stack entry.
     val quickActionStart: String? = when (initialDeepLink) {
-        is DeepLinkAction.NewVoiceChat -> {
-            DeepLinkCoordinator.setPendingChatAction(
-                DeepLinkCoordinator.ChatAction.START_VOICE,
-            )
-            Routes.chat("__new__${java.util.UUID.randomUUID()}")
-        }
         is DeepLinkAction.NewCameraChat -> {
             DeepLinkCoordinator.setPendingChatAction(
                 DeepLinkCoordinator.ChatAction.OPEN_CAMERA,
@@ -665,7 +669,8 @@ fun AppNavigation(
                 onPermissionsClick = { navController.safeNavigate(Routes.PERMISSIONS) },
                 onUsageClick = { navController.safeNavigate(Routes.USAGE_STATS) },
                 onAppearanceClick = { navController.safeNavigate(Routes.APPEARANCE) },
-                onBackgroundClick = { navController.safeNavigate(Routes.BACKGROUND) },
+                onBackgroundClick = { navController.safeNavigate(Routes.background()) },
+                onVoiceWakeClick = { navController.safeNavigate(Routes.background(voiceWake = true)) },
                 onLogsClick = { navController.safeNavigate(Routes.LOGS) },
                 onAboutClick = { navController.safeNavigate(Routes.ABOUT) },
                 onMountedFoldersClick = { navController.safeNavigate(Routes.MOUNTED_FOLDERS) },
@@ -1492,9 +1497,16 @@ fun AppNavigation(
             )
         }
 
-        composable(Routes.BACKGROUND) {
+        composable(
+            Routes.BACKGROUND,
+            arguments = listOf(
+                navArgument("voice") { type = NavType.IntType; defaultValue = 0 },
+            ),
+        ) {
+            val voice = it.arguments?.getInt("voice") ?: 0
             BackgroundSettingsScreen(
                 onBack = { navController.safePopBackStack() },
+                scrollToVoiceWake = voice == 1,
             )
         }
 

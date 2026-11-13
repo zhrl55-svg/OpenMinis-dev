@@ -68,7 +68,14 @@ android {
         buildConfigField("String", "UPDATE_CHANNEL", "\"stable\"")
 
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            // [T-mnn-emulator] 端侧 MNN 的 .so 只有 arm64-v8a（官方只发这一份），
+            // 但模拟器调试需要能装上 APK。加 -PallAbis=true 打全架构。
+            // ★ 注意：打了全架构后 x86_64 模拟器上 MNN 仍不可用（没有 x86_64 的 so，
+            //   且 PackageManager 会定 primaryCpuAbi=x86_64 不走 ARM 翻译层）——
+            //   LocalMnnModel.abiSupported() 会判定为不支持并优雅降级。
+            if (providers.gradleProperty("allAbis").orNull != "true") {
+                abiFilters += listOf("arm64-v8a")
+            }
         }
 
         externalNativeBuild {
@@ -178,7 +185,9 @@ android {
     }
 
     androidResources {
-        noCompress += listOf("tar.gz", "proot-aarch64")
+        // KWS/ASR ONNX files are read by native code; leave them uncompressed
+        // so sherpa can mmap them straight out of the APK.
+        noCompress += listOf("tar.gz", "proot-aarch64", "onnx")
     }
 
     testOptions {

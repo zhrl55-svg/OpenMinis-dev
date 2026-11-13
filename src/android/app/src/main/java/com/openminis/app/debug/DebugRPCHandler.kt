@@ -103,12 +103,6 @@ class DebugRPCHandler(private val context: Context) {
             "debug.scroll" -> handleScroll(params)
             "debug.inputText" -> handleInputText(params)
             "debug.setClipboard" -> handleSetClipboard(params)
-            "debug.voice.injectFailedAudio" -> {
-                if (!BuildConfig.DEV_TOOLS) {
-                    throw RPCException(-32601, "Method not found: $method. Call 'rpc.discover' to list available methods.")
-                }
-                handleVoiceInjectFailedAudio(params)
-            }
             "debug.llmRequests" -> handleLLMRequests(params)
             "debug.llmRequests.clear" -> { LLMRequestLog.clear(); JSONObject().put("cleared", true) }
             "debug.agentTrace" -> handleAgentTrace(params)
@@ -722,31 +716,6 @@ class DebugRPCHandler(private val context: Context) {
      * Debug-only by construction: DebugServer is started under
      * `if (BuildConfig.DEBUG)` in MinisApp, so no release build carries this.
      */
-    /**
-     * [T-android-voice-asr-stall-skip] DEBUG-only: queue a WAV as a failed
-     * voice utterance, exactly as the provider engine does when a take's
-     * transcription fails. The voice panel then shows its Retry prompt, and
-     * Retry runs the real provider fail-over (stall offer, Switch Model, System
-     * fallback) on that audio — the only way to exercise it on a device with no
-     * one to speak into the microphone.
-     */
-    private fun handleVoiceInjectFailedAudio(params: JSONObject): JSONObject {
-        val b64 = params.optString("wavBase64", "").ifEmpty { throw RPCException(-32602, "Missing 'wavBase64' param") }
-        val wav = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
-        val seconds = ((wav.size - 44).coerceAtLeast(0) / 32000.0)
-        com.openminis.app.ui.chat.voice.VoiceSendGate.recordFailure(
-            com.openminis.app.speech.SpeechRecognitionManager.FailedAudio(
-                wav = wav,
-                seconds = seconds,
-                error = com.openminis.app.speech.RecognitionError.NETWORK,
-                message = "injected by debug.voice.injectFailedAudio",
-                engineId = params.optString("engineId", "provider"),
-            ),
-            com.openminis.app.ui.chat.voice.VoiceSendGate.generation,
-        )
-        return JSONObject().put("ok", true).put("bytes", wav.size).put("seconds", seconds)
-    }
-
     private suspend fun handleSetClipboard(params: JSONObject): JSONObject {
         val text = params.optString("text")
         if (text.isEmpty()) throw RPCException(-32602, "Invalid params: 'text' is required")

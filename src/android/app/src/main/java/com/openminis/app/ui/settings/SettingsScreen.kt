@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Lan
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.Router
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.outlined.FrontHand
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Groups
 import androidx.compose.material.icons.outlined.Handyman
@@ -119,6 +121,9 @@ fun SettingsScreen(
     // OEM autostart guidance). Default no-op so older callers/tests
     // don't need to be retrofitted.
     onBackgroundClick: () -> Unit = {},
+    // [T-android-voice-wake] Jumps straight to the voice-wake section of
+    // the background screen (the wake word was buried there).
+    onVoiceWakeClick: () -> Unit = {},
     // Hook accepted for forward-compat with AppNavigation's About route. The
     // About row below still has a TODO onClick in HEAD; future settings-bucket
     // work will wire this through.
@@ -126,6 +131,11 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var showFeedbackSheet by remember { mutableStateOf(false) }
+    // [T-local-assistant] 助理模式（端侧直连）。默认关 —— 端侧是加速器，
+    // 不是主链路；打开后只有规则命中且端侧抽全参数的那批指令走端侧。
+    var localAssistantMode by remember {
+        mutableStateOf(com.openminis.app.llm.mnn.LocalAssistantPrefs.isEnabled(context))
+    }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -254,6 +264,19 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_env_vars),
                     subtitle = stringResource(R.string.settings_env_vars_subtitle),
                     onClick = onEnvVarsClick,
+                )
+                // [T-local-assistant] 助理模式：端侧直连。放在这一节的最后
+                // （Agent 运行时能力的末尾），一行开关，关掉就完全回到云端。
+                SettingsSwitchRow(
+                    icon = Icons.Outlined.Bolt,
+                    iconColor = Color(0xFF5856D6),
+                    title = stringResource(R.string.settings_assistant_mode),
+                    subtitle = stringResource(R.string.settings_assistant_mode_subtitle),
+                    checked = localAssistantMode,
+                    onCheckedChange = { on ->
+                        localAssistantMode = on
+                        com.openminis.app.llm.mnn.LocalAssistantPrefs.setEnabled(context, on)
+                    },
                     showDivider = false,
                 )
             }
@@ -354,6 +377,23 @@ fun SettingsScreen(
             }
 
             // -- Logs --
+            // [T-android-voice-wake] Voice wake gets its own top-level row:
+            // it used to live only inside the background screen, below the
+            // battery rows, and nobody found it.
+            SettingsSection(
+                title = stringResource(R.string.settings_voice_wake_section),
+                footer = stringResource(R.string.settings_voice_wake_entry_footer),
+            ) {
+                SettingsItem(
+                    icon = Icons.Outlined.Mic,
+                    iconColor = Color(0xFF34C759),
+                    title = stringResource(R.string.settings_voice_wake),
+                    subtitle = stringResource(R.string.settings_voice_wake_entry_subtitle),
+                    onClick = onVoiceWakeClick,
+                    showDivider = false,
+                )
+            }
+
             SettingsSection(title = stringResource(R.string.settings_section_logs)) {
                 SettingsItem(
                     icon = Icons.Outlined.Description,

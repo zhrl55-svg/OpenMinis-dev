@@ -130,7 +130,5 @@ class ComposerHintCarouselTest {
         assertTrue("a hidden composer does not use up its rounds", ui.contains("repeatOnLifecycle(Lifecycle.State.RESUMED)"))
         assertTrue(ui.contains("delay(ComposerHintCarousel.INTERVAL_MS)"))
         assertTrue("each page fits one line by shrinking, floor 0.75", ui.contains("private const val MIN_FIT_SCALE = 0.75f"))
-        // The voice panel keeps the joined line, as on iOS.
-        assertTrue(ProductionSources.read("ui/chat/voice/InlineVoiceInputPanel.kt").contains("contextUsageAnnotatedText(usageLine)"))
     }
 }

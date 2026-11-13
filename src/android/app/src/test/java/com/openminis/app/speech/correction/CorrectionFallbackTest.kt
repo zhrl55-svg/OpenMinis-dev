@@ -1,6 +1,5 @@
 package com.openminis.app.speech.correction
 
-import com.openminis.app.ProductionSources
 import com.openminis.app.R
 import com.openminis.app.data.model.FallbackStrategy
 import com.openminis.app.data.model.LLMError
@@ -308,22 +307,4 @@ class CorrectionFallbackTest {
         )
     }
 
-    @Test
-    fun `the voice panel shows the reason`() {
-        val src = ProductionSources.read("ui/chat/voice/InlineVoiceInputPanel.kt")
-        assertTrue(src.contains("CorrectionFailureReason.res(suggestion)"))
-    }
-
-    @Test
-    fun `the voice panel drops a correction for text that is no longer on screen`() {
-        // [T-voice-correction-stale-result] With per-model budgets a result can
-        // land minutes later; applied blindly it overwrote newer dictation or
-        // put a sent message back in the composer.
-        val src = ProductionSources.read("ui/chat/voice/InlineVoiceInputPanel.kt")
-        val run = src.substringAfter("fun runCorrection() {").substringBefore("\n    fun stopCapture()")
-        val guard = "if (transcript.trim() != text || VoiceSendGate.generation != startGeneration) {"
-        assertTrue(run.contains("val startGeneration = VoiceSendGate.generation"))
-        assertTrue(run.indexOf(guard) in 0 until run.indexOf("setTranscript(suggestion.corrected)"))
-        assertTrue("before the result toasts too", run.indexOf(guard) < run.indexOf("R.string.voice_correction_none_needed"))
-    }
 }

@@ -66,6 +66,7 @@ import com.openminis.app.tools.FileWriteTool
 import com.openminis.app.tools.MemoryTools
 import com.openminis.app.tools.BatchToolOrder
 import com.openminis.app.tools.ReadImageTool
+import com.openminis.app.tools.AmapSearchTool
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
@@ -9907,6 +9908,28 @@ class ChatViewModel(
                     val fallbackProviders = buildFallbackProviders(provider)
 
                     try {
+                        // [T-mnn-local] 助理模式的端侧快速路径：规则选工具 + 端侧抽参
+                        // → 直接执行 → 出结果，完全不调云端。
+                        //
+                        // 放在 runAgentLoop 之前、同一个 try/finally 内 —— 这样
+                        // releaseSlot / setInactive / isStreaming 复位这些收尾
+                        // 自动复用，不会漏。
+                        //
+                        // 返回 false 表示「这条不该走端侧」，照旧走云端：
+                        // 规则没命中、抽参不完整、ABI 不支持、模型缺失、
+                        // 或有附件（端侧不处理图片/文件）。
+                        val handledLocally = if (!headless && promptAttachments.isEmpty()) {
+                            runCatching {
+                                runLocalAssistantFastPath(trimmed, realSessionId.ifEmpty { activeSessionId })
+                            }.getOrElse { t ->
+                                AppLogger.warning(TAG_STREAM, "[T-mnn-local] fast path threw: ${t.javaClass.simpleName}: ${t.message}")
+                                false
+                            }
+                        } else false
+
+                        if (handledLocally) {
+                            AppLogger.info(TAG_STREAM, "send LOCAL FAST PATH handled; skipping cloud call")
+                        } else {
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
@@ -9920,6 +9943,8 @@ class ChatViewModel(
                         // Skipped on cancel: cancelled job won't reach here.
                         drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
                         AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        flushFastPathNote()
+                        }   // end of: else { cloud path }
                     } catch (e: CancellationException) {
                         AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
                         Log.d(TAG, "Agent loop cancelled")
@@ -10973,6 +10998,167 @@ class ChatViewModel(
             )
         }
         return turn
+    }
+
+    /**
+     * [T-mnn-local] 助理模式的端侧快速路径。
+     *
+     * 规则选工具 → 端侧 0.3B 抽参数 → 直接执行 → 写回一条助手消息。
+     * **全程不碰云端**，所以一条「运行 ls -la」的总耗时约 0.4s 推理 + 工具耗时。
+     *
+     * @return true = 已处理完（调用方不要再调 runAgentLoop）；
+     *         false = 这条不该走端侧，交给云端。
+     *
+     * ## 什么时候返回 false（每一条都是「云端更靠谱」的情形）
+     * - 助理模式没开（默认关）
+     * - 端侧模型不可用（ABI 不是 arm64 / 模型文件没部署）
+     * - 规则没命中（闲聊、查询、多步任务都属于这类）
+     * - 端侧抽参不完整
+     *
+     * 端侧这条路**必须是失败即回退**：用户不该因为它的存在而得到更差的结果。
+     */
+    /**
+     * [T-mnn-local] 端侧没接住、这条走了云端时，待展示的轻提示。
+     *
+     * 只在两种「用户明显想执行工具、但端侧没搞定」的情形下有值：
+     * 抽参失败（no-args）、安全闸拦下（unsafe）。
+     * 规则没命中的普通对话**不提示** —— 那是绝大多数消息，提示了就是噪音。
+     *
+     * 提示在**云端回复之后**才展示（见 runAgentLoop 返回后的 flushFastPathNote），
+     * 顺序上才是「先回答、再补一句为什么没用端侧」。
+     */
+    private var pendingFastPathNote: String? = null
+
+    /**
+     * [T-mnn-local] 展示待提示的「端侧未接管」说明，然后清空。
+     *
+     * 用 [appendSystemInfo] 而不是写一条助手消息：它是一条灰色系统提示，
+     * 不进对话流、不进 agentHistory、不影响下一轮上下文。
+     */
+    private suspend fun flushFastPathNote() {
+        val note = pendingFastPathNote ?: return
+        pendingFastPathNote = null
+        withContext(Dispatchers.Main) {
+            appendSystemInfo(note, "info")
+        }
+    }
+
+    private suspend fun runLocalAssistantFastPath(
+        userText: String,
+        sessionId: String,
+    ): Boolean {
+        val fastPath = com.openminis.app.llm.mnn.AssistantFastPath
+        if (sessionId.isEmpty()) {
+            fastPath.trace(context, "skip: empty-session")
+            return false
+        }
+        if (!fastPath.isEnabled(context)) {
+            fastPath.trace(context, "skip: disabled")
+            return false
+        }
+
+        val model = com.openminis.app.llm.mnn.LocalMnnModel.get(context)
+        fastPath.trace(
+            context,
+            "enter enabled=true abi=${model.abiSupported()} model=${model.isAvailable()}",
+        )
+        if (!model.abiSupported()) {
+            fastPath.trace(context, "skip: abi-unsupported")
+            return false
+        }
+        if (!model.isAvailable()) {
+            fastPath.trace(context, "skip: model-missing")
+            return false
+        }
+        if (!com.openminis.app.llm.mnn.LocalAssistantRouter.isPlainInstruction(userText)) {
+            fastPath.trace(context, "skip: programmatic-envelope")
+            return false
+        }
+
+        val tools = com.openminis.app.tools.AgentTools.makeAgentTools()
+        val planner = com.openminis.app.llm.mnn.LocalIntentPlanner()
+        val def = planner.resolveTool(userText, tools)
+        if (def == null) {
+            fastPath.trace(context, "no-rule: 「${userText.take(60)}」")
+            return false
+        }
+
+        val extraction = withContext(Dispatchers.IO) {
+            planner.extractArgs(userText, def, model)
+        }
+        if (extraction == null) {
+            fastPath.trace(
+                context,
+                "no-args: tool=${def.name} raw=${planner.lastRaw.take(160)}",
+            )
+            pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
+            return false
+        }
+        if (!com.openminis.app.llm.mnn.LocalAssistantRouter.isSafe(
+                def.name,
+                extraction.args,
+                userText,
+            )
+        ) {
+            fastPath.trace(
+                context,
+                "unsafe: tool=${def.name} args=${extraction.args.toString().take(120)}",
+            )
+            pendingFastPathNote = fastPath.cloudHandoffNote("unsafe")
+            return false
+        }
+
+        val toolId = "local_" + java.util.UUID.randomUUID().toString()
+        val result = try {
+            executeTool(
+                name = extraction.tool,
+                argsJson = extraction.args.toString(),
+                toolId = toolId,
+                toolBlocks = mutableListOf(),
+                assistantId = java.util.UUID.randomUUID().toString(),
+                currentText = "",
+            )
+        } catch (t: Throwable) {
+            AppLogger.warning(TAG, "[T-mnn-local] tool ${extraction.tool} threw: ${t.javaClass.simpleName}: ${t.message}")
+            fastPath.trace(
+                context,
+                "tool-threw: ${t.javaClass.simpleName}: ${t.message}",
+            )
+            return false          // 工具炸了 → 让云端重试一次，别把半截结果丢给用户
+        }
+
+        val summary = extraction.args.optString("tool_title").ifBlank { userText.take(12) }
+        val text = com.openminis.app.llm.mnn.AssistantFastPath.formatResult(
+            tool = extraction.tool,
+            summary = summary,
+            text = result.output,
+            isError = !result.success,
+        )
+
+        val partsJson = """[{"type":"text","value":${ChatPartsJson.escapeJson(text)}}]"""
+        val row = runCatching {
+            chatRepository.appendMessage(sessionId, "assistant", partsJson)
+        }.getOrNull()
+
+        val bubble = ChatMessage(
+            id = row?.id ?: "local_${System.currentTimeMillis()}",
+            role = "assistant",
+            content = text,
+        )
+        withContext(Dispatchers.Main) {
+            _messages.value = _messages.value + bubble
+        }
+
+        AppLogger.info(
+            TAG,
+            "[T-mnn-local] handled locally: tool=${extraction.tool} success=${result.success} " +
+                "len=${result.output.length}",
+        )
+        fastPath.trace(
+            context,
+            "handled: tool=${extraction.tool} success=${result.success} len=${result.output.length}",
+        )
+        return true
     }
 
     private suspend fun runAgentLoop(
@@ -14172,6 +14358,12 @@ class ChatViewModel(
         val toolTitle = try { JSONObject(argsJson).optString("tool_title", name) } catch (_: Exception) { name }
 
         return when (name) {
+            AmapSearchTool.NAME -> {
+                // [T-mnn-local] 地点查询。同步 HTTP，放 IO 线程（executeTool 已在 IO 上下文）。
+                withContext(Dispatchers.IO) {
+                    AmapSearchTool.execute(context, argsJson)
+                }
+            }
             FileReadTool.NAME -> {
                 val result = FileReadTool.execute(argsJson, fsSessionId, context)
                 // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.

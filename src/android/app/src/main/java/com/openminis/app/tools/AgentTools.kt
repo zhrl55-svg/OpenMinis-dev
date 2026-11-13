@@ -67,6 +67,9 @@ object AgentTools {
             add(ReadImageTool.definition())
         }
         if (browserEnabled) add(browserUseDefinition())
+        // [T-mnn-local] 地点查询（高德 Web API）。端侧规则里也有对应关键词，
+        // 所以「附近有超市吗」这类问题可以完全在端侧闭环，不调云端。
+        add(AmapSearchTool.definition())
         if (hubEnabled) add(com.openminis.app.hub.HubCallTool.definition(hubDeviceNames))
         if (memoryEnabled) {
             if (!isHelper) add(memoryWriteDefinition())

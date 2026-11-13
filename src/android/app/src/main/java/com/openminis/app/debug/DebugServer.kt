@@ -91,10 +91,17 @@ class DebugServer(
 
         acceptJob = scope.launch {
             try {
-                // Listen on all interfaces (0.0.0.0) for network access
-                val ss = ServerSocket(port, 10)
+                // Listen on all interfaces (0.0.0.0) for network access.
+                //
+                // The preferred port can be taken by ANOTHER app on the device
+                // (on this phone 5321 belongs to the companion app) — and then
+                // the debug server dies silently at startup: no port, no
+                // server, no error the developer can see. So walk forward to
+                // the next free port and PUBLISH the one we got:
+                //   adb shell cat /sdcard/Android/data/<pkg>/files/debug_server_port.txt
+                val ss = bindWithFallback()
                 serverSocket = ss
-                Log.i(TAG, "Debug server listening on port $port (all interfaces)")
+                Log.i(TAG, "Debug server listening on port ${ss.localPort} (all interfaces)")
                 Log.i(TAG, "Remote (non-loopback) clients must send X-Minis-Token: $authToken")
 
                 while (!stopped) {
@@ -109,6 +116,35 @@ class DebugServer(
                 Log.e(TAG, "Failed to start server on port $port: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Bind the preferred port, or the next free one.
+     *
+     * The chosen port is written to the app's external files dir so a
+     * developer (or a script) can find it without logcat:
+     * `adb shell cat /sdcard/Android/data/<pkg>/files/debug_server_port.txt`
+     */
+    private fun bindWithFallback(): ServerSocket {
+        var lastError: Exception? = null
+        for (candidate in port..(port + 20)) {
+            try {
+                val ss = ServerSocket(candidate, 10)
+                runCatching {
+                    val dir = context.getExternalFilesDir(null)
+                    if (dir != null) {
+                        java.io.File(dir, "debug_server_port.txt").writeText(candidate.toString())
+                    }
+                }
+                if (candidate != port) {
+                    Log.w(TAG, "Port $port was taken — debug server moved to $candidate")
+                }
+                return ss
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IllegalStateException("no free port")
     }
 
     fun stop() {

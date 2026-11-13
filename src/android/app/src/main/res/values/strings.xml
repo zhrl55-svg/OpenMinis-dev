@@ -343,6 +343,8 @@
     <string name="soul_icon_error_too_large">That image is too large to store. Try a simpler one.</string>
     <string name="settings_env_vars">Environment Variables</string>
     <string name="settings_env_vars_subtitle">Variables injected into the sandbox</string>
+    <string name="settings_assistant_mode">On-device assistant</string>
+    <string name="settings_assistant_mode_subtitle">Let short, explicit instructions run on this phone instead of asking the cloud model</string>
     <string name="settings_section_storage">Storage</string>
     <string name="settings_storage_subtitle">Manage Alpine Linux rootfs and browse files</string>
     <string name="settings_section_permissions">Permissions</string>
@@ -1388,6 +1390,50 @@
     <string name="settings_bg_overlay">Background Task Overlay</string>
     <string name="settings_bg_overlay_footer">Show a small floating capsule with the current tool while Minis is in the background. Requires permission to display over other apps. Tap the capsule to bring Minis to the foreground; drag to move it.</string>
     <string name="settings_bg_overlay_permission_needed">Allow drawing over other apps to enable</string>
+    <!-- [T-android-voice-wake] Background wake word + voice status ball -->
+    <string name="settings_voice_wake_section">Voice wake</string>
+    <string name="settings_voice_wake">Background voice wake</string>
+    <string name="settings_voice_wake_footer">Keep listening for the wake word while Minis is in the background. Requires microphone permission; most phones also need Minis exempted from battery optimisation. A wake-up opens a new voice chat.</string>
+    <string name="settings_voice_wake_permission_needed">Microphone permission is required</string>
+    <string name="settings_voice_wake_word">Wake word</string>
+    <string name="settings_voice_wake_word_footer">Comma-separate up to four Chinese wake words. The default “你好米尼斯” also has a precomputed pinyin line for older Android versions.</string>
+    <string name="settings_voice_wake_word_dialog_title">Wake word</string>
+    <string name="settings_voice_wake_word_hint">你好米尼斯</string>
+    <string name="settings_voice_wake_word_invalid">Enter 1–4 Chinese words separated by commas.</string>
+    <string name="settings_voice_wake_word_save">Save</string>
+    <string name="settings_voice_wake_word_cancel">Cancel</string>
+    <string name="settings_voice_wake_overlay">Voice status floating ball</string>
+    <string name="settings_voice_wake_overlay_footer">Show the wake listener state in a small floating ball while Minis is in the background. Tap it to open voice chat; drag to move it.</string>
+    <string name="settings_voice_wake_overlay_permission_needed">Allow drawing over other apps to show the ball</string>
+    <string name="settings_voice_wake_tone">Wake response</string>
+    <string name="settings_voice_wake_tone_footer">Minis answers “I’m here” out loud when it hears the wake word.</string>
+    <string name="settings_voice_wake_voiceprint">Voiceprint check</string>
+    <string name="settings_voice_wake_voiceprint_footer">Only answer your voice. The first utterance after enabling this is enrolled as your voiceprint; turning it off forgets it.</string>
+    <string name="settings_voice_wake_threshold">Voiceprint threshold</string>
+    <string name="settings_voice_wake_threshold_footer">How closely the voice has to match. Raise it to lock out other people, lower it if you are being ignored.</string>
+    <string name="voice_wake_acknowledgement">I’m here</string>
+    <string name="settings_voice_wake_entry_subtitle">Wake word, voiceprint, floating ball and wake tone</string>
+    <string name="settings_voice_wake_entry_footer">Minis listens for the wake word in the background. On a wake it starts listening for your request and answers out loud, without opening the app.</string>
+    <string name="voice_wake_notification_channel">Voice wake</string>
+    <string name="voice_wake_notification_channel_desc">Ongoing notification for background wake-word listening.</string>
+    <string name="voice_wake_notification_title">Minis is listening</string>
+    <string name="voice_wake_notification_waiting">Waiting for “%1$s”</string>
+    <string name="voice_wake_notification_waking">Woken up, getting ready to listen…</string>
+    <string name="voice_wake_notification_listening">Listening — go ahead…</string>
+    <string name="voice_wake_notification_replying">Replying…</string>
+    <string name="voice_wake_notification_paused">Listening pauses in the foreground or while speaking</string>
+    <string name="voice_wake_notification_stop">Stop</string>
+    <string name="voice_wake_alert_channel">Voice wake alert</string>
+    <string name="voice_wake_alert_title">Minis was woken</string>
+    <string name="voice_wake_alert_body">Tap to continue with voice input.</string>
+    <string name="voice_wake_overlay_title">MINIS VOICE</string>
+    <string name="voice_wake_state_waiting">Waiting</string>
+    <string name="voice_wake_state_waking">Waking</string>
+    <string name="voice_wake_state_listening">Listening</string>
+    <string name="voice_wake_state_replying">Replying</string>
+    <string name="voice_wake_state_paused">Paused</string>
+    <string name="voice_wake_state_error">Error</string>
+    <string name="voice_wake_state_off">Off</string>
     <!-- [T-android-dynamic-island] Android 16 Live Updates / dynamic-island toggle. -->
     <string name="settings_dynamic_island">Dynamic Island (Live Updates)</string>
     <string name="settings_dynamic_island_footer">Show live Agent status on the Android 16 status chip. When on, this replaces the floating overlay so you don\'t see two status indicators at once.</string>
@@ -1423,6 +1469,7 @@
     <string name="chat_stop_confirm_message">The current reply and any running tools will be stopped.</string>
     <string name="chat_stop_confirm_stop">Stop</string>
     <string name="chat_stop_confirm_keep_running">Keep Running</string>
+    <string name="chat_stop_speaking">Stop speaking</string>
     <!-- [T-stop-choice] Stop: current tool only, or everything -->
     <string name="chat_stop_choice_title">What should stop?</string>
     <string name="chat_stop_choice_current_tools">Running now: %1$s</string>
@@ -2152,6 +2199,16 @@
     <string name="chat_load_older_messages">↑ Load older messages</string>
     <!-- [T-error-persist-android] Shown when the model returns an empty reply (no text, no tools). -->
     <string name="error_empty_response_generic">Model returned an empty response. Please try again or switch models.</string>
+    <!-- [T-local-assistant] The closing line of an on-device (端侧) turn: the
+         tool already ran locally, so the cloud model is never asked to
+         summarise it. ("On-device" is the claim we can make — auto-titling
+         may still make its own small cloud call.) -->
+    <string name="local_assistant_done">Executed on-device by the local assistant.</string>
+    <string name="local_assistant_failed">The on-device run failed — see the tool card for details.</string>
+    <!-- [T-local-assistant-no-provider] No cloud model is configured and the on-device
+         assistant could not handle the request (rule miss, extraction failure, or the
+         safety check bounced it). -->
+    <string name="error_local_assistant_no_provider">No cloud model is configured, and the on-device assistant could not handle this request.</string>
     <string name="chat_error_model_refused">The model declined to respond to this request. Try rephrasing, or switch to a different model.</string>
     <string name="chat_error_model_refused_category">Blocked by the model provider\'s usage policy (category: %1$s). Continuing or rephrasing in this chat will likely be blocked again — switch to a different model, or start a new chat.</string>
     <string name="chat_error_max_tokens_truncated">Response truncated (max tokens reached)</string>

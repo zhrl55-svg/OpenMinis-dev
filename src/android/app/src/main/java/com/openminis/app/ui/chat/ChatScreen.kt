@@ -55,6 +55,7 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -101,7 +102,6 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AppShortcut
@@ -178,7 +178,6 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -246,9 +245,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
@@ -307,6 +304,7 @@ import com.openminis.app.ui.browser.BrowserSheet
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
 import com.openminis.app.ui.components.safeLaunchPicker
+import com.openminis.app.ui.chat.voice.holdToTalkGlow
 
 // iOS ChatColors equivalent
 internal val ToolCheckColor = Color(0xFF34C759) // iOS .green
@@ -340,6 +338,17 @@ private const val SEND_FOLLOW_GRACE_MS = 2_000L
 // and neuter the stream-end re-pin. Comfortably covers the settle LE's own
 // 220 ms delay plus its 900 ms verification pass.
 private const val STREAM_END_ARM_GRACE_MS = 1_500L
+
+/**
+ * [T-android-hold-to-talk] How long the input field must be held before it
+ * opens the microphone.
+ *
+ * Deliberately shorter than Android's own long-press timeout (500 ms): the
+ * text field's selection toolbar fires at 500 ms, and the dictation has to
+ * win that race — otherwise the toolbar opens under the finger that is
+ * holding the field.
+ */
+private const val HOLD_TO_TALK_DELAY_MS = 320L
 
 
 /**
@@ -807,10 +816,9 @@ fun ChatScreen(
     val providerName by viewModel.providerName.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // [T-android-voice-panel] Shared 3-stage RECORD_AUDIO permission flow
-    // (system dialog → post-DENY poll → in-app settings gate). Extracted from
-    // the mic button's triggerVoiceInput so the inline voice panel can request
-    // the same way. Returns true when granted.
+    // Shared 3-stage RECORD_AUDIO permission flow (system dialog → post-DENY
+    // poll → in-app settings gate) used by press-and-hold dictation. Returns
+    // true when granted.
     val ensureMicPermissionFlow: suspend () -> Boolean = ensure@{
         val perm = android.Manifest.permission.RECORD_AUDIO
         val hasPerm: () -> Boolean = {
@@ -856,9 +864,6 @@ fun ChatScreen(
     val toggleAnchorScope = rememberCoroutineScope()
     val toggleAnchor = remember(listState) { ChatToggleAnchor(listState) }
     toggleAnchor.scope = toggleAnchorScope
-    // [T-android-voice-viewport-context] The rows the chat list is rendering,
-    // for voice correction's on-screen context. Filled next to `flatItems`.
-    val voiceScreenItems = remember(sessionId) { VoiceScreenItemsHolder() }
     // T325: draft persists on the VM so navigation (e.g. push EnvVars and
     // pop back) doesn't wipe what the user has typed. Mirrors iOS
     // `AIChatView` which binds the composer against `vm.inputText`.
@@ -2094,40 +2099,7 @@ fun ChatScreen(
             tracedScrollToItem("SEND-PATH/settle", 0, 0)
         }
     }
-    // [T-voice-send-waits-for-asr] Second half of a send deferred until voice
-    // input finished. The transcript reaches the composer through the panel's
-    // callbacks, so copy the final transcript over explicitly before deciding,
-    // then send (or enqueue, while a reply runs — sendMessage routes that)
-    // exactly as the tap would have.
-    val submitAfterVoice: () -> Unit = {
-        val transcript = com.openminis.app.ui.chat.voice.VoiceSendGate.transcript
-        if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive &&
-            transcript.isNotEmpty() && viewModel.inputText.value != transcript
-        ) {
-            viewModel.setInputText(transcript)
-            viewModel.updateSlashMenuState(transcript)
-        }
-        val text = viewModel.inputText.value
-        if (text.isNotBlank() || viewModel.attachments.value.isNotEmpty()) {
-            performSendOrEnqueueNow(text)
-        } else {
-            AppLogger.info("VoiceSend", "[voice-send] nothing to send after recognition finished")
-        }
-    }
-    // [T-voice-send-waits-for-asr] Every send entry goes through this gate:
-    // while voice mode still owes text (mic capturing, audio held below the
-    // segment minimum, a transcription in flight) the send waits for it
-    // instead of clearing the composer — which cancelled the capture and lost
-    // the last sentence spoken before the tap.
-    val deferSendUntilVoiceFinished: () -> Boolean = {
-        com.openminis.app.ui.chat.voice.VoiceSendGate.deferSendIfOwed(coroutineScope, context) {
-            submitAfterVoice()
-        }
-    }
-    val performSendOrEnqueue: (String) -> Unit = handler@{ rawText ->
-        if (deferSendUntilVoiceFinished()) return@handler
-        performSendOrEnqueueNow(rawText)
-    }
+    val performSendOrEnqueue: (String) -> Unit = performSendOrEnqueueNow
     // T196: timestamp of the last drag-stop. The streaming auto-follow LE
     // below has three stages (initial scroll → re-pin after frame → settle
     // after 220 ms) any of which can fire on the *next* token after a drag
@@ -4172,7 +4144,6 @@ fun ChatScreen(
                 // [T-android-stream-grow-reveal] Spots live-reply rows that
                 // appear while following; see the flatten pass below.
                 val growRevealTracker = remember(sessionId) { StreamGrowRevealTracker() }
-                SideEffect { voiceScreenItems.items = flatItems }
                 // [T-android-coldload-offmain-parse] Composition-snapshot
                 // prewarmer (captures the markdown palette) used by the
                 // flatten effect below to warm the parse caches for the
@@ -6429,6 +6400,43 @@ fun ChatScreen(
                 // activates the keyboard instead. Box wraps the existing
                 // composer Column so the gesture + overlay live in the same
                 // coordinate space without disturbing the bar's own layout.
+                // [T-android-hold-to-talk] Press-and-hold dictation.
+                //
+                // The mic button is gone: a short tap on the input field is
+                // still a text tap, a long hold opens the microphone, the
+                // composer border lights up while it is open, and letting go
+                // sends what was said. Eight seconds without a sentence that
+                // passes the voiceprint puts the microphone back to sleep.
+                val holdToTalk = remember {
+                    com.openminis.app.ui.chat.voice.HoldToTalkController(context)
+                }
+                val holdToTalkListening = holdToTalk.state ==
+                    com.openminis.app.ui.chat.voice.HoldToTalkController.State.LISTENING ||
+                    holdToTalk.state ==
+                    com.openminis.app.ui.chat.voice.HoldToTalkController.State.TRANSCRIBING
+                // The wake word runs its conversation in the service, so the
+                // composer has no pointer gesture to react to. Mirror the
+                // service's LISTENING phase onto the same border: a wake hit
+                // in the foreground must light up the input card exactly like
+                // a long press does, and go dark when the window expires.
+                val wakeSnapshot by com.openminis.app.speech.wake.VoiceWakeState.state
+                    .collectAsState()
+                val wakeListening = wakeSnapshot.phase ==
+                    com.openminis.app.speech.wake.VoiceWakePhase.LISTENING
+                DisposableEffect(holdToTalk) {
+                    holdToTalk.requestPermission = { ensureMicPermissionFlow() }
+                    holdToTalk.onSend = { spoken ->
+                        AppLogger.info("VoiceSend", "[hold-to-talk] send ${spoken.length} chars")
+                        // The recognised text goes through the same path a
+                        // Send tap takes, so a dictation behaves exactly like
+                        // a typed message.
+                        performSendOrEnqueue(spoken)
+                    }
+                    holdToTalk.onSleep = {
+                        AppLogger.info("VoiceSend", "[hold-to-talk] slept without a sentence")
+                    }
+                    onDispose { holdToTalk.release() }
+                }
                 Box(modifier = Modifier
                     .fillMaxWidth()
                     .pointerInput(Unit) {
@@ -6463,10 +6471,7 @@ fun ChatScreen(
                                     // is text to send; otherwise keep the
                                     // overlay hidden and defer keyboard
                                     // activation to onEnd.
-                                    // [T-voice-send-waits-for-asr] Owed voice
-                                    // text counts: the swipe finishes it.
-                                    val hasText = viewModel.inputText.value.isNotBlank() ||
-                                        com.openminis.app.ui.chat.voice.VoiceSendGate.owesText()
+                                    val hasText = viewModel.inputText.value.isNotBlank()
                                     if (hasText) {
                                         val newProgress = (-totalDy / swipeThresholdPx).coerceIn(0f, 1f)
                                         if (newProgress >= swipeArmFraction && sendSwipeProgress < swipeArmFraction) {
@@ -6485,8 +6490,7 @@ fun ChatScreen(
                                 }
                             }
                             // Drag ended (finger up or pointer cancel).
-                            val hasText = viewModel.inputText.value.isNotBlank() ||
-                                com.openminis.app.ui.chat.voice.VoiceSendGate.owesText()
+                            val hasText = viewModel.inputText.value.isNotBlank()
                             val swipedUp = claimed && totalDy < 0 &&
                                 kotlin.math.abs(totalDy) > kotlin.math.abs(totalDx)
                             if (swipedUp && hasText) {
@@ -6580,6 +6584,16 @@ fun ChatScreen(
                             tier = contextUsage?.tier ?: ContextUsage.Tier.NORMAL,
                             cornerRadius = 20.dp,
                             animate = !animationsDisabled(context),
+                        )
+                        // [T-android-hold-to-talk] The listening border.
+                        //
+                        // The card has no border of its own — it is a
+                        // floating card separated from the backdrop by a
+                        // painted shadow — so this travelling arc is the only
+                        // thing that says the microphone is open.
+                        .holdToTalkGlow(
+                            active = holdToTalkListening || wakeListening,
+                            cornerRadius = 20.dp,
                         )
                         .padding(top = if (attachments.isNotEmpty()) 8.dp else 4.dp),
                 ) {
@@ -6864,86 +6878,6 @@ fun ChatScreen(
                         Spacer(modifier = Modifier.height(6.dp))
                     }
 
-                    // While a voice session is active, the TextField is
-                    // replaced by a live waveform + partial-transcription
-                    // preview (matches iOS `inputFieldOrWaveform`). Recognized
-                    // text is already delta-appended into `inputText` by the
-                    // mic button's callback, so when recording ends the field
-                    // shows the full recognized string automatically.
-                    val recSttState by com.openminis.app.speech.SpeechRecognitionManager
-                        .state.collectAsState()
-                    val recIsRecording = recSttState == com.openminis.app.speech.RecognitionState.RECORDING ||
-                        recSttState == com.openminis.app.speech.RecognitionState.STARTING ||
-                        recSttState == com.openminis.app.speech.RecognitionState.FINISHING
-                    // [T-android-voice-panel] Inline voice mode replaces the text
-                    // field with the panel (mirrors iOS inputFieldOrWaveform →
-                    // InlineVoiceInputView). The legacy in-composer waveform
-                    // branch below only serves captures started OUTSIDE the
-                    // panel (none today, kept as a safety net).
-                    if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive) {
-                        // [T-readaloud-volume-bar] The read-aloud volume is no
-                        // longer a standing row here: it opens above the TTS
-                        // capsule from its speaker (SpeechPlayerCapsule).
-                        com.openminis.app.ui.chat.voice.InlineVoiceInputPanel(
-                            providerRepository = providerRepository,
-                            inputText = inputText,
-                            onInputTextChange = { text ->
-                                viewModel.setInputText(text)
-                                viewModel.updateSlashMenuState(text)
-                            },
-                            ensureMicPermission = { ensureMicPermissionFlow() },
-                            // [T-android-correction-context-wiring] Feed AI
-                            // correction the live conversation context. Reads the
-                            // FULL message list (not the windowed uiMessages) so
-                            // older turns still contribute rare-term grounding;
-                            // evaluated lazily at correction time.
-                            conversationContextProvider = { screen ->
-                                com.openminis.app.speech.correction.VoiceCorrection
-                                    .buildConversationContext(context, viewModel.messages.value, screen)
-                            },
-                            // [T-android-voice-viewport-context] What is on
-                            // screen when correction starts (the list renders
-                            // with reverseLayout = true).
-                            captureScreen = {
-                                captureVoiceScreenSnapshot(listState, voiceScreenItems.items, reverseLayout = true)
-                            },
-                            // [T-android-context-usage-hint] Same generation
-                            // stream the composer uses; the panel gives it a
-                            // timed slot rather than the composer's
-                            // focus-driven lifecycle.
-                            contextUsageHint = contextUsageHint,
-                            onEditProvider = onEditProviderClick,
-                            // [T-android-voice-auto-send] The panel reports a
-                            // final transcript; the composer owns sending, so
-                            // reuse the same path a Send tap takes.
-                            onAutoSend = { submitAfterVoice() },
-                        )
-                    } else if (recIsRecording) {
-                        val levels by com.openminis.app.speech.SpeechRecognitionManager
-                            .audioLevels.collectAsState()
-                        val partial by com.openminis.app.speech.SpeechRecognitionManager
-                            .recognizedText.collectAsState()
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                        ) {
-                            AudioWaveformView(
-                                levels = levels,
-                                barColor = Color.Red.copy(alpha = 0.75f),
-                                heightDp = 28,
-                            )
-                            if (partial.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(6.dp))
-                                Text(
-                                    text = partial,
-                                    fontSize = 14.sp,
-                                    color = ChatColors.secondaryText,
-                                    maxLines = 2,
-                                )
-                            }
-                        }
-                    } else
                     // Text field (iOS: placeholder "Message Minis", no border)
                     run {
                         val interactionSource = remember { MutableInteractionSource() }
@@ -7074,9 +7008,6 @@ fun ChatScreen(
                         // onSend; this lambda is the single source of
                         // truth for what "press Enter to send" means.
                         val performEnterSend: () -> Boolean = handler@{
-                            // [T-voice-send-waits-for-asr] Same gate as the
-                            // button: finish owed voice text first.
-                            if (deferSendUntilVoiceFinished()) return@handler true
                             if (inputText.isBlank() && attachments.isEmpty()) return@handler false
                             // Intercept slash commands so "/compact" et al.
                             // run locally instead of being sent as a chat
@@ -7251,6 +7182,49 @@ fun ChatScreen(
                                 .fillMaxWidth()
                                 .heightIn(min = 25.dp)
                                 .focusRequester(inputFocusRequester)
+                                // [T-android-hold-to-talk] A short tap is a
+                                // text tap; a long hold opens the microphone.
+                                //
+                                // The gesture is detected in the Initial
+                                // pass so the field's own long-press (the
+                                // selection toolbar) can be swallowed before
+                                // it opens — otherwise the toolbar pops up
+                                // under the finger that is dictating.
+                                .pointerInput(Unit) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(
+                                            requireUnconsumed = false,
+                                            pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                                        )
+                                        // Returns true when the finger lifts
+                                        // before the hold threshold.
+                                        val liftedEarly = withTimeoutOrNull(
+                                            HOLD_TO_TALK_DELAY_MS,
+                                        ) {
+                                            var lifted = false
+                                            while (!lifted) {
+                                                val event = awaitPointerEvent(
+                                                    androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                                                )
+                                                lifted = event.changes.any { !it.pressed }
+                                            }
+                                            true
+                                        } == true
+                                        if (!liftedEarly) {
+                                            down.consume()
+                                            coroutineScope.launch { holdToTalk.start() }
+                                            var lifted = false
+                                            while (!lifted) {
+                                                val event = awaitPointerEvent(
+                                                    androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                                                )
+                                                event.changes.forEach { it.consume() }
+                                                lifted = event.changes.any { !it.pressed }
+                                            }
+                                            holdToTalk.stop()
+                                        }
+                                    }
+                                }
                                 .onFocusChanged {
                                     // [T-android-composer-placeholder-rotation]
                                     // Advance the placeholder on the focus-GAIN
@@ -7628,413 +7602,22 @@ fun ChatScreen(
 
                         Spacer(modifier = Modifier.weight(1f))
 
-                        // Right: Mic button — only renders when a speech engine
-                        // is actually available on this device (handles the
-                        // AOSP / HarmonyOS / GMS-free case).
-                        val sttAvailable by com.openminis.app.speech.SpeechRecognitionManager
-                            .isAvailable.collectAsState()
-                        val sttState by com.openminis.app.speech.SpeechRecognitionManager
-                            .state.collectAsState()
-                        val sttLocale by com.openminis.app.speech.SpeechRecognitionManager
-                            .locale.collectAsState()
-                        var showLangSheet by remember { mutableStateOf(false) }
-                        // While recording, a tappable 2-letter language pill
-                        // appears to the left of the mic button. Outside a
-                        // session the mic button's own badge stays hidden and
-                        // the pill is not rendered — matches iOS.
-                        if (sttAvailable && !com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive &&
-                            (sttState == com.openminis.app.speech.RecognitionState.RECORDING ||
-                                sttState == com.openminis.app.speech.RecognitionState.STARTING)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .background(ChatColors.inputIconBg, CircleShape)
-                                    .border(0.5.dp, ChatColors.inputIconBorder, CircleShape)
-                                    .clip(CircleShape)
-                                    .clickable { showLangSheet = true },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    text = sttLocale.language.uppercase().take(2),
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = ChatColors.primaryText,
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(6.dp))
-                        }
-                        if (showLangSheet) {
-                            SpeechLanguagePickerSheet(onDismiss = { showLangSheet = false })
-                        }
-                        // Extracted so the app-icon "voice chat" quick action
-                        // (DeepLinkCoordinator.ChatAction.START_VOICE) can
-                        // fire the same flow on first compose without
-                        // duplicating the 3-stage permission dance.
-                        val triggerVoiceInput: () -> Unit = lambda@{
-                            // [T-android-voice-panel] The mic button now toggles
-                            // the INLINE VOICE PANEL (mirrors iOS MicButton →
-                            // voiceInputActive). Capture start/stop lives inside
-                            // the panel; this button only enters/exits the mode.
-                            if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive) {
-                                // Exit voice → keyboard. Keep the transcript: the
-                                // composer mirrors it (iOS keyboard-text-carry).
-                                if (com.openminis.app.speech.SpeechRecognitionManager.state.value !=
-                                    com.openminis.app.speech.RecognitionState.IDLE
-                                ) {
-                                    com.openminis.app.speech.SpeechRecognitionManager.stopRecording()
-                                }
-                                com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive = false
-                                ComposerInputModePrefs.save(context, voice = false)
-                                voiceUsedSinceClear = false
-                            } else {
-                                // [T-android-voice-entry-always-available]
-                                // Entering voice mode is an explicit retry — give
-                                // every engine a fresh start so a past transient
-                                // failure (mic was busy, permission since granted,
-                                // provider since configured) doesn't keep the
-                                // feature dead for the rest of the process.
-                                com.openminis.app.speech.SpeechRecognitionManager
-                                    .clearDegradationAndRefresh()
-                                voiceUsedSinceClear = true
-                                com.openminis.app.ui.chat.voice.VoiceModePrefs.enteredFromText = true
-                                com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive = true
-                            }
-                        }
-
-                        // App-icon quick action: when the user launched via
-                        // `minis://action/voice_chat`, auto-fire the mic on
-                        // first compose. Consumed exactly once so re-entering
-                        // the chat later does NOT re-trigger.
-                        //
-                        // [T-android-voice-entry-always-available] Gated on the
-                        // STRUCTURAL check, not the sttAvailable runtime probe.
-                        // The probe is false on ROMs without a system speech
-                        // service (ColorOS et al.), which made this shortcut a
-                        // silent no-op there — while the mic button itself had
-                        // already moved to hasMicrophoneHardware. Entering the
-                        // panel without a live engine is fine: the panel owns
-                        // the "no engine → here's how to configure one" story.
-                        LaunchedEffect(Unit) {
-                            if (!com.openminis.app.speech.SpeechRecognitionManager
-                                    .hasMicrophoneHardware
-                            ) {
-                                return@LaunchedEffect
-                            }
-                            val pending = com.openminis.app.deeplink.DeepLinkCoordinator
-                                .pendingChatAction.value
-                            if (pending == com.openminis.app.deeplink.DeepLinkCoordinator
-                                    .ChatAction.START_VOICE
-                            ) {
-                                com.openminis.app.deeplink.DeepLinkCoordinator
-                                    .consumePendingChatAction()
-                                triggerVoiceInput()
-                            }
-                        }
-
-                        // [T-android-remove-auto-enter-voice] Auto-enter-voice on
-                        // cold launch / new chat removed (was ec95451a). The
-                        // composer now always starts in text mode; voice is only
-                        // entered when the user taps the mic button below.
-                        // [T-android-voice-panel] "Read replies" TTS toggle —
-                        // shown only while the voice panel is active (mirrors
-                        // iOS readAloudToolbarToggle, 2-state on Android).
-                        // [T-android-edit-readreplies-hide] Hidden while message
-                        // edit mode is active: the Exit-Edit pill lives in the
-                        // same bottom row, and both capsules plus their spacers
-                        // overflow the constrained width and render overlapped
-                        // (iOS af9f3d3e parity).
-                        if (com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive && editingId == null) {
-                            // [T-android-tts-capsule] Source of truth is the
-                            // GLOBAL VoiceOutputState (same "readReplies" pref
-                            // key as before), shared with the floating
-                            // speech-player capsule — so the pill reflects the
-                            // capsule's mute/close actions too. Mirrors iOS
-                            // readAloudToolbarToggle's three states:
-                            //   active → muted → off → active …
-                            LaunchedEffect(Unit) {
-                                com.openminis.app.speech.VoiceOutputState.init(context)
-                            }
-                            val ttsEnabled by com.openminis.app.speech.VoiceOutputState
-                                .isEnabled.collectAsState()
-                            val ttsMuted by com.openminis.app.speech.VoiceOutputState
-                                .isMuted.collectAsState()
-                            val readReplies = ttsEnabled && !ttsMuted
-                            // [T-android-provider-tts-readaloud] Routes each
-                            // utterance through the resolved Voice Output
-                            // selection (provider TTS, system engine as
-                            // fallback) instead of always using the on-device
-                            // engine, and sanitizes Markdown before speaking.
-                            val replyTts = remember {
-                                com.openminis.app.speech.ReadAloudPlayer(context)
-                            }
-                            // The previous bare TextToSpeechManager() was never
-                            // shut down, leaking an engine binding on every
-                            // entry into the voice panel.
-                            DisposableEffect(replyTts) {
-                                onDispose { replyTts.shutdown() }
-                            }
-                            // [T-android-read-replies-pill-metrics] Sizing mirrors
-                            // iOS readAloudToolbarToggle: 10/6 padding around a
-                            // 5pt-spaced icon+label, on a capsule that HUGS its
-                            // content (iOS pins it with .fixedSize()).
-                            //
-                            // Two Compose-specific corrections are needed to land
-                            // on the same result:
-                            //  • wrapContentWidth() + centered arrangement — this
-                            //    pill sits between weight(1f) spacers, so without
-                            //    hugging it absorbs slack and the un-arranged Row
-                            //    packed icon+text against the start edge, which is
-                            //    what read as "not horizontally centered".
-                            //  • the label's line height is pinned to the font size
-                            //    and its font padding disabled. Compose Text
-                            //    otherwise reserves the font's full ascent/descent
-                            //    leading on top of the 6dp padding, making the pill
-                            //    visibly taller than iOS's for the same numbers.
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center,
-                                modifier = Modifier
-                                    .wrapContentWidth()
-                                    .clip(RoundedCornerShape(50))
-                                    .background(
-                                        if (ttsEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                        else ChatColors.secondaryText.copy(alpha = 0.10f),
-                                    )
-                                    .clickable {
-                                        // iOS tap-cycle (readAloudToolbarToggle):
-                                        // active → mute (capsule stays visible);
-                                        // muted → fully off (capsule hides);
-                                        // off → on, un-muted.
-                                        val s = com.openminis.app.speech.VoiceOutputState
-                                        when {
-                                            ttsEnabled && !ttsMuted -> s.setMuted(true)
-                                            ttsEnabled && ttsMuted -> s.setEnabled(false)
-                                            else -> { s.setMuted(false); s.setEnabled(true) }
-                                        }
-                                    }
-                                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                            ) {
-                                Icon(
-                                    if (readReplies) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = if (ttsEnabled) MaterialTheme.colorScheme.primary else ChatColors.secondaryText,
-                                )
-                                Spacer(modifier = Modifier.width(5.dp))
-                                Text(
-                                    stringResource(R.string.voice_panel_read_replies),
-                                    // Metrics live IN the style, not as separate
-                                    // Text parameters: passing `style =` replaces
-                                    // the merged style, so a lineHeight given
-                                    // alongside it can be lost.
-                                    //
-                                    // includeFontPadding=false drops the font's
-                                    // ascent/descent slack that Compose otherwise
-                                    // adds on top of the 6dp padding — that slack
-                                    // was what made the pill overshoot its
-                                    // siblings. lineHeight is pinned to 1.25× the
-                                    // font size (a normal text leading) and
-                                    // centered, so the label occupies a
-                                    // predictable box and the 6dp padding reads
-                                    // evenly above and below.
-                                    style = LocalTextStyle.current.copy(
-                                        fontSize = 13.sp,
-                                        lineHeight = 16.25.sp,
-                                        platformStyle = PlatformTextStyle(includeFontPadding = false),
-                                        lineHeightStyle = LineHeightStyle(
-                                            alignment = LineHeightStyle.Alignment.Center,
-                                            trim = LineHeightStyle.Trim.None,
-                                        ),
-                                    ),
-                                    color = if (ttsEnabled) MaterialTheme.colorScheme.primary else ChatColors.secondaryText,
-                                )
-                            }
-                            // [T-android-streaming-readaloud] Speak the reply AS
-                            // IT STREAMS. Previously this waited for isStreaming
-                            // to flip false and then spoke the whole finished
-                            // message, so the user heard nothing until
-                            // generation completed — while the sentence-splitting
-                            // machinery built for exactly this sat uncalled.
-                            //
-                            // Now each new chunk of the in-flight assistant
-                            // message is fed to the player, which emits complete
-                            // sentences immediately and flushes the tail at
-                            // stream end (mirrors iOS feedDynamicTTS).
-                            //
-                            // `spokenUpTo` tracks how much of the current
-                            // message has been handed over, so a recomposition
-                            // mid-stream doesn't re-speak the prefix. It resets
-                            // whenever the target message identity changes.
-                            val lastAssistant = messages.lastOrNull { it.role == "assistant" }
-                            val lastAssistantId = lastAssistant?.id
-                            var spokenUpTo by remember(lastAssistantId) { mutableStateOf(0) }
-                            // [T-android-readreplies-sidechannel] Feed the TTS
-                            // from the STREAMING SIDE-CHANNEL, not the messages
-                            // list. The previous effect keyed on
-                            // `lastAssistant?.content` — but under
-                            // T-streaming-side-channel the canonical list stays
-                            // STATIC during a turn (per-token text rides
-                            // streamingById; messages is only rewritten at turn
-                            // end). So the effect fired exactly twice per turn:
-                            //  1. Turn start (empty placeholder): fell through
-                            //     the guard, marked lastSpokenAssistantKey, had
-                            //     no text to feed — spokenUpTo stayed 0.
-                            //  2. Turn end (final content lands): spokenUpTo was
-                            //     still 0, and the key it now compared against
-                            //     was the one IT marked in step 1 —
-                            //     alreadySeen=true, whole message suppressed.
-                            // Net effect: TTS engines bound and initialized on
-                            // every panel entry and speak() was never called
-                            // once — minis-2026-08-16.log has 5 "suppressed"
-                            // lines, 0 "feeding" lines, which is exactly the
-                            // reported "朗读回复开了但没有任何声音". The
-                            // self-poisoning also explains the paradoxical
-                            // `alreadySeen=true streaming=true` entries.
-                            //
-                            // Keys are (id, toggle) ONLY — the effect survives
-                            // the whole turn and collects live deltas inside,
-                            // so the history guard runs once per message
-                            // identity and can no longer poison itself.
-                            LaunchedEffect(lastAssistantId, readReplies) {
-                                if (!readReplies || lastAssistantId == null) return@LaunchedEffect
-                                val key = lastAssistantId.hashCode()
-                                val alreadySeen = com.openminis.app.ui.chat.voice.VoiceModePrefs
-                                    .lastSpokenAssistantKey == key
-                                val liveAtEntry =
-                                    viewModel.streamingById.value.containsKey(lastAssistantId)
-                                // History on entry must not be read aloud: only
-                                // a message that is live right now (or mid-turn
-                                // awaiting its first token) is followed.
-                                if (alreadySeen || (!viewModel.isStreaming.value && !liveAtEntry)) {
-                                    android.util.Log.i(
-                                        "ReadReplies",
-                                        "suppressed: alreadySeen=$alreadySeen " +
-                                            "streamingNow=${viewModel.isStreaming.value} " +
-                                            "(history is never spoken)",
-                                    )
-                                    com.openminis.app.ui.chat.voice.VoiceModePrefs
-                                        .lastSpokenAssistantKey = key
-                                    return@LaunchedEffect
-                                }
-                                com.openminis.app.ui.chat.voice.VoiceModePrefs
-                                    .lastSpokenAssistantKey = key
-                                // [T-android-tts-scope-align] New reply → stop
-                                // the PREVIOUS reply's still-playing speech and
-                                // drop its queue, exactly once per followed
-                                // message. iOS does this on the first text delta
-                                // of a turn (hasClearedTTSForCurrentTurn +
-                                // stopSpeechForThisSession); without it the old
-                                // reply keeps talking and the new one queues
-                                // BEHIND it, minutes late on long replies.
-                                replyTts.stop()
-                                // [T-android-tts-scope-align] Tool-boundary
-                                // flush, from iOS's toolCallStart handler: text
-                                // that streamed just before a tool call and
-                                // never met a terminator must speak BEFORE the
-                                // tool runs, not sit buffered until stream end.
-                                var lastToolCount = 0
-                                kotlinx.coroutines.flow.combine(
-                                    viewModel.streamingById,
-                                    viewModel.isStreaming,
-                                ) { stream, streamingNow ->
-                                    Triple(
-                                        stream[lastAssistantId]?.content,
-                                        streamingNow,
-                                        stream[lastAssistantId]?.toolBlocks ?: emptyList(),
-                                    )
-                                }.collect { (live, streamingNow, toolBlocks) ->
-                                    val toolCount = toolBlocks.size
-                                    if (toolCount > lastToolCount) {
-                                        // Flush first so the half-sentence that
-                                        // preceded the tool call is spoken
-                                        // BEFORE the announcement, not after it.
-                                        replyTts.flush()
-                                        // [T-android-tts-tool-announce-off]
-                                        // 2026-11-08: the per-tool announcement
-                                        // ("Running: ...", "Executing script: ...")
-                                        // is NOT spoken any more.
-                                        //
-                                        // It used to be queued here (T-android-tts-
-                                        // tool-announce, an iOS port) so a listener
-                                        // would not sit in silence while a tool ran.
-                                        // But the announcement carries the TOOL's
-                                        // state, not the reply's prose: users asked
-                                        // for read-aloud to read the REPLY BODY and
-                                        // nothing else — hearing "Running:
-                                        // seeking", "Running: shell_execute" etc.
-                                        // between sentences is noise, not narration.
-                                        //
-                                        // The flush() above is KEPT: the half
-                                        // sentence that preceded the tool call must
-                                        // still be spoken BEFORE the tool runs, or it
-                                        // would sit buffered until stream end.
-                                        lastToolCount = toolCount
-                                    }
-                                    // Turn end drains the side-channel AFTER
-                                    // publishing the final list — fall back to
-                                    // the canonical message so the tail past the
-                                    // last delta still gets spoken.
-                                    val text = live
-                                        ?: viewModel.messages.value
-                                            .lastOrNull { it.id == lastAssistantId }?.content
-                                        ?: return@collect
-                                    if (text.length > spokenUpTo) {
-                                        // [T-android-tts-diag] Kept: a field log
-                                        // must show WHY nothing spoke (or that
-                                        // feeding did happen and the fault is
-                                        // further down, in the player/engine).
-                                        android.util.Log.i(
-                                            "ReadReplies",
-                                            "feeding tts +${text.length - spokenUpTo} chars " +
-                                                "(total=${text.length}) live=${live != null} " +
-                                                "streaming=$streamingNow",
-                                        )
-                                        replyTts.appendText(text.substring(spokenUpTo))
-                                        spokenUpTo = text.length
-                                    }
-                                    // Stream over and side-channel drained —
-                                    // flush the trailing fragment that never got
-                                    // a sentence terminator.
-                                    if (!streamingNow && live == null) replyTts.flush()
-                                }
-                            }
-                            // [T-android-read-replies-pill-metrics] Balancing
-                            // spacer. There is a weight(1f) spacer BEFORE the
-                            // pill but the trailing side only had a fixed 8dp,
-                            // so all the row's slack collected on the left and
-                            // pushed the pill right of the bar's centre (measured
-                            // +59px on a 1080px screen). Matching weights on both
-                            // sides centre it between the leading (+, /) and
-                            // trailing (keyboard, mic/send) button groups.
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
-
-                        // [T-android-voice-entry-always-available] The voice /
-                        // keyboard toggle is ALWAYS shown. It used to be gated on
-                        // `sttAvailable`, a runtime probe — so when the active
-                        // engine degraded mid-session the button disappeared while
-                        // `isVoiceActive` stayed true, leaving the user inside the
-                        // voice panel with no way back to the keyboard (the toggle
-                        // IS this button). Gating an escape hatch on the health of
-                        // the thing you're escaping from is the bug.
-                        //
-                        // Existence now depends only on a structural fact —
-                        // microphone hardware. "No speech service", "engine
-                        // degraded" and "no ASR provider configured" are all
-                        // RECOVERABLE states, explained inside the panel with a
-                        // link to the relevant settings rather than by silently
-                        // removing the control.
-                        if (com.openminis.app.speech.SpeechRecognitionManager.hasMicrophoneHardware) {
-                            MicButton(
-                                isRecording = !com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive &&
-                                    (sttState == com.openminis.app.speech.RecognitionState.RECORDING ||
-                                        sttState == com.openminis.app.speech.RecognitionState.STARTING),
-                                localeBadge = null,
-                                onClick = { triggerVoiceInput() },
-                                onLongClick = { showLangSheet = true },
-                                isVoiceActive = com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive,
+                        // [T-android-tts-stop-button] The wake conversation
+                        // speaks through its own TTS engine, so the capsule's
+                        // stop control cannot reach it. This small speaker
+                        // appears only while audio is playing and silences
+                        // both the wake reply and any read-aloud player.
+                        val ttsSpeaking by com.openminis.app.speech.VoiceOutputState
+                            .isSpeaking.collectAsState()
+                        if (ttsSpeaking) {
+                            ComposerSpeakingButton(
+                                onClick = {
+                                    com.openminis.app.speech.VoiceOutputState.activePlayer?.stop()
+                                    com.openminis.app.speech.wake.WakeWordService.stopSpeaking()
+                                    com.openminis.app.speech.VoiceOutputState.isSpeaking.value = false
+                                },
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
                         }
 
                         Spacer(modifier = Modifier.width(8.dp))
@@ -8053,15 +7636,7 @@ fun ChatScreen(
                         // satisfies the composer's send guard. Without this an
                         // image-only "look at this" send is impossible.
                         val hasText = inputText.isNotBlank()
-                        // [T-voice-send-waits-for-asr] Voice mode has captured
-                        // speech that is not text yet. Send must be tappable
-                        // then — tapping it is how the user says "I'm done" —
-                        // even though the composer may still be empty; the tap
-                        // finishes recognition and then sends or enqueues.
-                        val voiceOwesText = com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive &&
-                            (sttState != com.openminis.app.speech.RecognitionState.IDLE ||
-                                com.openminis.app.ui.chat.voice.VoiceSendGate.isFinishingForSend)
-                        val hasContent = hasText || attachments.isNotEmpty() || voiceOwesText
+                        val hasContent = hasText || attachments.isNotEmpty()
                         // [T-android-showstop-subagent] "Is this conversation
                         // working" is not "is this VM streaming". Once the
                         // parent delegates, it stops streaming and waits for the
@@ -8191,8 +7766,6 @@ fun ChatScreen(
                             // only sends when canActivate.
                             ComposerSendButton(
                                 canActivate = canActivate,
-                                busy = com.openminis.app.ui.chat.voice.VoiceModePrefs.isVoiceActive &&
-                                    com.openminis.app.ui.chat.voice.VoiceSendGate.isFinishingForSend,
                                 onSend = {
                                     // T-drag-send-queue: route through the
                                     // shared send-or-enqueue handler. Same
@@ -8970,3 +8543,32 @@ private fun SpeedTierNavBadge(tier: com.openminis.app.data.SpeedTier, textSize: 
  */
 internal fun hasMovableShareContent(inputText: String, attachmentCount: Int): Boolean =
     inputText.isNotBlank() || attachmentCount > 0
+
+/**
+ * Small speaker beside Send, visible only while replies are being spoken.
+ *
+ * [InputCircleButton] matches the composer's other 38 dp icon buttons. The
+ * pulse makes it read as "audio is playing now" rather than one more static
+ * action.
+ */
+@Composable
+private fun ComposerSpeakingButton(onClick: () -> Unit) {
+    val transition = rememberInfiniteTransition(label = "composerSpeaking")
+    val alpha by transition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "composerSpeakingAlpha",
+    )
+    InputCircleButton(onClick = onClick) {
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+            contentDescription = stringResource(R.string.chat_stop_speaking),
+            tint = ChatColors.sendButton.copy(alpha = alpha),
+            modifier = Modifier.size(20.dp),
+        )
+    }
+}

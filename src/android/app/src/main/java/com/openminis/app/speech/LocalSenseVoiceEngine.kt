@@ -340,6 +340,36 @@ class LocalSenseVoiceEngine(private val context: Context) : SpeechRecognitionEng
         degraded = false
     }
 
+    /**
+     * [T-android-voice-wake] Transcribe audio captured by somebody else.
+     *
+     * The wake pipeline owns the microphone while the user speaks, so the
+     * utterance never goes through [start] — it is handed over as a WAV and
+     * recognised offline, with no second AudioRecord and no route fight.
+     *
+     * [wav] is mono PCM16 with a 44-byte header at 16 kHz.
+     */
+    override fun transcribeRetained(
+        wav: ByteArray,
+        locale: Locale,
+        listener: SpeechRecognitionEngine.Listener,
+    ) {
+        val header = VoiceActivityDetector.WAV_HEADER_BYTES
+        val pcm = if (wav.size > header) wav.copyOfRange(header, wav.size) else ByteArray(0)
+        if (pcm.isEmpty()) {
+            listener.onError(RecognitionError.TRANSCRIPTION_FAILED, "没有可识别的音频")
+            return
+        }
+        val dir = resolveModelDir()
+        if (dir == null) {
+            listener.onError(RecognitionError.TRANSCRIPTION_FAILED, "端侧模型缺失")
+            return
+        }
+        Thread {
+            transcribe(pcm, dir, listener)
+        }.also { it.isDaemon = true }.start()
+    }
+
     private fun transcribe(bytes: ByteArray, dir: File, listener: SpeechRecognitionEngine.Listener) {
         val samples = FloatArray(bytes.size / 2)
         for (i in samples.indices) {

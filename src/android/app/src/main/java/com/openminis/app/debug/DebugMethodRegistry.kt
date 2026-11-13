@@ -410,18 +410,6 @@ object DebugMethodRegistry {
             example = ex("text" to "hello world"),
         ),
         MethodSpec(
-            name = "debug.voice.injectFailedAudio",
-            description = "DEBUG-only: queue a 16 kHz mono PCM16 WAV as a failed voice utterance, as the provider " +
-                "engine does when a transcription fails. The voice panel shows its Retry prompt; Retry runs the " +
-                "real ASR fail-over (stall offer / Switch Model / System fallback) on that audio.",
-            params = listOf(
-                ParamSpec("wavBase64", "string", required = true, description = "Base64 of the WAV file."),
-                ParamSpec("engineId", "string", required = false, default = "provider", description = "Engine that retries it."),
-            ),
-            returns = "{ok, bytes, seconds}",
-            example = ex("wavBase64" to "<base64>"),
-        ),
-        MethodSpec(
             name = "debug.setClipboard",
             description = "Put text on the system clipboard from inside the app process, " +
                 "so `input keyevent PASTE` can trigger a REAL single-shot paste. " +

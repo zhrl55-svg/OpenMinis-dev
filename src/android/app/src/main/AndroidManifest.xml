@@ -9,6 +9,16 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- [T-android-voice-wake] Background wake-word listening is a microphone
+         foreground service. Android 14+ requires this type-specific permission
+         in addition to RECORD_AUDIO, and the service must be started while the
+         app is visible. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- [T-android-voice-wake] Wake-up alert on the lock screen: the activity
+         behind the full-screen intent opens the voice conversation. On
+         Android 14+ the user can revoke this special access; the service falls
+         back to a heads-up notification when it is unavailable. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- T-android-fgs-timeout-crash: switched from dataSync to mediaPlayback.
          dataSync has a hard 6h/24h cumulative cap on Android 14+, after
          which the system throws ForegroundServiceDidNotStopInTimeException
@@ -261,7 +271,7 @@
             </intent-filter>
             <!-- T-android-app-icon-shortcuts: app-icon long-press quick
                  actions (mirrors iOS QuickActionRouter / UIApplicationShortcutItem).
-                 Three static shortcuts (new_chat / voice_chat / camera_chat)
+                 Two static shortcuts (new_chat / camera_chat)
                  launch MainActivity via minis://action/<name> deep-link.
                  The shortcuts meta-data must live on the alias that owns
                  the LAUNCHER filter, not on MainActivity itself. -->
@@ -501,6 +511,14 @@
             android:name=".hub.HubService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <!-- [T-android-voice-wake] Always-on wake-word listener. The service
+             owns the only AudioRecord while it is listening; it releases the
+             mic before launching the in-app recognizer. -->
+        <service
+            android:name=".speech.wake.WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- [T-android-backup-fgs] Keeps a running backup alive in the
              background (progress notification + wake lock). Started by

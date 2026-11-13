@@ -965,7 +965,14 @@ class MinisApp : Application(), ImageLoaderFactory {
                 }
                 // [T-fgs-start-not-allowed-guard] A foreground-service start the
                 // system refused in the background is retried now.
-                if (wasBackgrounded) SessionActivityTracker.onAppForegrounded()
+                if (wasBackgrounded) {
+                    SessionActivityTracker.onAppForegrounded()
+                    // [T-android-voice-wake] Same guard for the microphone
+                    // foreground service: Android 12+ refuses the start
+                    // from the background, so the wake listener would stay
+                    // dead until the user opened the app by hand.
+                    com.openminis.app.speech.wake.WakeWordController.onAppForegrounded(this@MinisApp)
+                }
                 // [T-android-session-paused-badge-hardkill] On foreground,
                 // reconcile PAUSED badges from the DB tail (authoritative
                 // interrupted-state) instead of the old heuristic that marked
@@ -1035,6 +1042,9 @@ class MinisApp : Application(), ImageLoaderFactory {
 
         // Initialize speech-recognition adapter layer (system + provider engines).
         com.openminis.app.speech.SpeechRecognitionManager.init(this)
+        // [T-android-voice-wake] Background wake-word listener. Starts only when
+        // the user has enabled it and RECORD_AUDIO is granted.
+        com.openminis.app.speech.wake.WakeWordController.init(this)
 
         // Refresh model lists once per calendar day (mirrors iOS MinisApp.swift).
         // Runs per-instance in parallel; `autoRefreshModels` skips instances with custom models.

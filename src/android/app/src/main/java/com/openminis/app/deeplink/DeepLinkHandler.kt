@@ -56,7 +56,6 @@ sealed class DeepLinkAction {
      * App-icon long-press quick actions (mirrors iOS QuickActionRouter).
      *
      *  - [NewChat] — plain new draft chat
-     *  - [NewVoiceChat] — new chat + auto-trigger voice input mic on first compose
      *  - [NewCameraChat] — new chat + auto-launch camera attachment on first compose
      *
      * Encoded as `minis://action/<name>` so the static shortcuts XML can
@@ -64,8 +63,32 @@ sealed class DeepLinkAction {
      * matches the existing minis:// deep-link conventions.
      */
     data object NewChat : DeepLinkAction()
-    data object NewVoiceChat : DeepLinkAction()
     data object NewCameraChat : DeepLinkAction()
+
+    /**
+     * [T-mnn-local] 跑一次端侧小模型推理（进程内 MNN）。
+     *
+     * 编码为 `minis://action/local_llm?prompt=...` —— 走既有的 deep-link
+     * 通道，不新增 exported receiver（那会多一个越权入口）。
+     * 结果写日志（tag `LocalLlmProbe`），用于验证端侧模型在本机真能跑。
+     */
+    data class RunLocalLlm(val prompt: String) : DeepLinkAction()
+
+    /**
+     * [T-mnn-local] 跑一遍端侧意图规划的验收用例集。
+     *
+     * 编码为 `minis://action/local_intent` —— 无参数，结果写外部目录。
+     */
+    data object RunLocalIntent : DeepLinkAction()
+
+    /**
+     * [T-mnn-local] 开关助理模式（端侧快速路径）。
+     *
+     * 编码为 `minis://action/assistant_mode?on=true|false`。
+     * 关掉时一条云端路径都不受影响 —— 这正是「失败即回退」的一部分：
+     * 开关本身也要能一条命令回退。
+     */
+    data class SetAssistantMode(val on: Boolean) : DeepLinkAction()
 
     /**
      * T183: any settings screen reachable by route string. Extends the
@@ -116,8 +139,17 @@ object DeepLinkHandler {
             // QuickActionRouter.swift action ids 1:1.
             "action" -> when (path.removePrefix("/")) {
                 "new_chat" -> DeepLinkAction.NewChat
-                "voice_chat" -> DeepLinkAction.NewVoiceChat
+                // Legacy wake-overlay / shortcut link. The inline voice panel
+                // is gone; keep the URI working as a plain new chat.
+                "voice_chat" -> DeepLinkAction.NewChat
                 "camera_chat" -> DeepLinkAction.NewCameraChat
+                "local_llm" -> DeepLinkAction.RunLocalLlm(
+                    uri.getQueryParameter("prompt")?.takeIf { it.isNotBlank() } ?: "你好",
+                )
+                "local_intent" -> DeepLinkAction.RunLocalIntent
+                "assistant_mode" -> DeepLinkAction.SetAssistantMode(
+                    on = uri.getQueryParameter("on")?.lowercase() != "false",
+                )
                 else -> DeepLinkAction.Unknown
             }
             "settings" -> parseSettingsPath(uri)
@@ -194,7 +226,7 @@ object DeepLinkHandler {
                 DeepLinkAction.OpenSettingsScreen(Routes.LOGS)
             }
             "appearance" -> DeepLinkAction.OpenSettingsScreen(Routes.APPEARANCE)
-            "background" -> DeepLinkAction.OpenSettingsScreen(Routes.BACKGROUND)
+            "background" -> DeepLinkAction.OpenSettingsScreen(Routes.background())
             "about" -> DeepLinkAction.OpenSettingsScreen(Routes.ABOUT)
             "network" -> DeepLinkAction.OpenSettingsScreen(Routes.NETWORK)
             // [FEAT-261021-04] Same paths and aliases as iOS DeepLinkRouter.

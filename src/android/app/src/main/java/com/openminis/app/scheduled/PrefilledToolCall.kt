@@ -30,6 +30,16 @@ import java.util.UUID
 data class PrefilledToolCall(
     val toolName: String,
     val argsJson: String,
+    /**
+     * 参数已经由调用方校验过。
+     *
+     * 定时任务存的预填永远不是 trusted —— 它们要过下面那套「只允许
+     * shell、命令不许太长」的存储规则。端侧助理模式（[com.openminis.app.llm.mnn.LocalAssistantRouter]）
+     * 的参数是**逐词校验过 + 安全校验过**的（命令逐词来自用户原话、
+     * 破坏性命令早就转云端了），所以不必再套那套存储规则 ——
+     * 那套规则只认 shell，会把 file_read / browser_use 这些一并拒掉。
+     */
+    val validated: Boolean = false,
 ) {
     /** The arguments as a fresh JSONObject; a malformed payload yields `{}`. */
     fun args(): JSONObject = runCatching { JSONObject(argsJson) }.getOrElse { JSONObject() }
@@ -44,11 +54,13 @@ data class PrefilledToolCall(
      * than failing silently every time the task fires.
      */
     fun validationError(): String? {
-        if (toolName !in SUPPORTED_TOOLS) {
+        if (!validated && toolName !in SUPPORTED_TOOLS) {
             return "prefilled tool '$toolName' is not supported yet (supported: ${SUPPORTED_TOOLS.joinToString()})"
         }
         val a = runCatching { JSONObject(argsJson) }.getOrNull()
             ?: return "prefilled tool arguments must be a JSON object"
+        // trusted 的参数已经过了调用方自己的校验，只保证是个 JSON 对象。
+        if (validated) return null
         return when (toolName) {
             SHELL_TOOL -> when {
                 a.optString("command", "").isBlank() -> "shell prefill needs a non-empty command"

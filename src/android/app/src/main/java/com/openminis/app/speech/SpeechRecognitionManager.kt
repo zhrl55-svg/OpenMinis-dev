@@ -458,6 +458,52 @@ object SpeechRecognitionManager {
         return true
     }
 
+    /**
+     * [T-android-voice-wake] Transcribe audio that somebody else captured.
+     *
+     * The wake pipeline owns the microphone while the user speaks — it has
+     * to, because the wake word and the request come from the same stream
+     * and the voiceprint needs the exact samples. So the request is
+     * recognised **offline** from the recorded WAV instead of through
+     * [startRecording]: no second AudioRecord, no route fight, and the
+     * capture never has to be handed over and back.
+     *
+     * @param wav mono PCM16 with a 44-byte header, at 16 kHz.
+     * @return false when a session is already in flight.
+     */
+    fun transcribeAudio(
+        wav: ByteArray,
+        onPartialOrFinal: (text: String, isFinal: Boolean) -> Unit,
+        onError: (RecognitionError, String?) -> Unit,
+    ): Boolean {
+        if (_state.value != RecognitionState.IDLE) {
+            VoicePipelineLog.event("manager.offline.rejected", "state" to _state.value)
+            return false
+        }
+        // Prefer the on-device engine: it transcribes a WAV without the
+        // microphone, while the system engine needs Android 13+ for a replay
+        // and the provider engine would upload the audio.
+        val engine = engines.firstOrNull {
+            it.id == LocalSenseVoiceEngine.ENGINE_ID && it.isAvailable
+        } ?: currentEngine()
+        if (engine == null) {
+            onError(RecognitionError.OEM_NO_SERVICE, "没有可用的识别引擎")
+            return false
+        }
+        VoicePipelineLog.event("manager.offline", "engine" to engine.id, "bytes" to wav.size)
+        setState(RecognitionState.STARTING)
+        _lastError.value = null
+        val listener = makeListener(engine.id, onPartialOrFinal, onError, null)
+        try {
+            engine.transcribeRetained(wav, _locale.value, listener)
+        } catch (e: Throwable) {
+            setState(RecognitionState.IDLE)
+            onError(RecognitionError.UNKNOWN, e.message)
+            return false
+        }
+        return true
+    }
+
     private fun makeListener(
         engineId: String,
         onPartialOrFinal: (text: String, isFinal: Boolean) -> Unit,

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import com.openminis.app.MinisApp
 import com.openminis.app.data.model.ThinkingLevel
+import com.openminis.app.logging.AppLogger
 import com.openminis.app.ui.chat.ChatViewModel
 import com.openminis.app.ui.chat.ChatViewModelStore
 import com.openminis.app.ui.chat.InputAttachment
@@ -273,12 +274,14 @@ internal object HeadlessChatRunner {
                     vm.activeEntryId.first { it != null }
                 }
             }
+            // [T-local-assistant-no-provider] 没解析出模型，不等于「这条消息
+            // 发不出去」：端侧助理模式本来就可能一个云端模型都不需要。
+            //
+            // 所以这里不再直接报错，把消息交给 VM 让它自己判断 —— 端侧能办
+            // 就端侧办（工具卡照常出、命令照常跑），办不了它会回
+            // Rejected("no_provider")，下面再把契约还原成老样子。
             if (ready == null) {
-                return@withContext PromptResult(
-                    status = "Error",
-                    responseText = "no_provider_resolved_in_5s",
-                    timedOut = false,
-                )
+                AppLogger.info("HeadlessChat", "no model entry resolved — trying the on-device assistant path")
             }
             // [T-android-submit-outcome] Ask the funnel what it did instead of
             // assuming. This used to call sendMessage() (Unit) and report "Running"
@@ -295,6 +298,14 @@ internal object HeadlessChatRunner {
             // the queued prompt went out without them.
             val outcome = vm.submitPrompt(text, prefill, attachments)
             if (outcome is ChatViewModel.SubmitOutcome.Rejected) {
+                // 契约不变：真的发不出去，仍然报 no_provider_resolved_in_5s。
+                if (ready == null && outcome.reason == "no_provider") {
+                    return@withContext PromptResult(
+                        status = "Error",
+                        responseText = "no_provider_resolved_in_5s",
+                        timedOut = false,
+                    )
+                }
                 return@withContext PromptResult(status = "Rejected", responseText = outcome.reason, timedOut = false)
             }
             if (!wait) {
