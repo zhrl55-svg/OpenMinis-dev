@@ -241,6 +241,10 @@ internal object ConfigBuiltins {
      * 默认关闭：端侧是加速器，不是主链路。
      */
     private fun registerAssistant(r: ConfigRegistry, context: Context) {
+        val routeStore = com.openminis.app.assistant.routing.AssistantRouteStore.get(context)
+        r.register(
+            com.openminis.app.config.collections.AssistantRoutesCollection(routeStore),
+        )
         r.register(
             PrefsBoolField(
                 path = "assistant.localMode",

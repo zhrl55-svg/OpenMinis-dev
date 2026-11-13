@@ -15,7 +15,6 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import java.util.TimeZone
 
 /**
  * android-alarm — schedule alarms and timers, list, or cancel them.
@@ -75,7 +74,7 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
         // legacy positional second arg (`schedule HH:MM`).
         val timeStr = args.get("time") ?: args.positional.getOrNull(1)
             ?: return NativeOffloadResult(2, "android-alarm set: --time <HH:MM|ISO> is required\n")
-        val (hour, minute) = parseTimeArg(timeStr)
+        val target = AlarmTimeParser.parse(timeStr)
             ?: return NativeOffloadResult(
                 2,
                 "android-alarm: invalid time '$timeStr' (expected HH:MM or ISO 8601)\n",
@@ -87,13 +86,26 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
                 2,
                 "android-alarm: invalid --repeat '$repeat' (use ONCE, DAILY, WEEKDAYS)\n",
             )
+        val unsupportedDate = AlarmTimeParser.unsupportedExplicitDate(target, mode)
+        if (unsupportedDate != null) {
+            val body = JSONObject()
+                .put("error", "explicit_date_not_supported")
+                .put(
+                    "message",
+                    "The system Clock can only schedule the next ${target.hour.toString().padStart(2, '0')}:" +
+                        "${target.minute.toString().padStart(2, '0')}; it cannot represent " +
+                        "$unsupportedDate. Ask the user to use a reminder for a specific date instead.",
+                )
+                .toString()
+            return NativeOffloadResult(2, OffloadOutput.formatBody(body, args) + "\n")
+        }
         // T266: single-source schedule via the system Clock app. The internal
         // AlarmOffloadManager.scheduleAlarm + SharedPreferences path is gone:
         // dual-writing produced ghost reminders that fired only inside Minis
         // and confused users who expected to manage everything in their phone
         // Clock UI. Any OEM that refuses ACTION_SET_ALARM (no Clock app, or a
         // permission-stripped fork) is now a hard error — no silent fallback.
-        val systemErr = scheduleViaSystemClock(label, hour, minute, mode)
+        val systemErr = scheduleViaSystemClock(label, target.hour, target.minute, mode)
         if (systemErr != null) {
             val body = JSONObject().put("error", "system_clock_unavailable")
                 .put("message", systemErr)
@@ -102,9 +114,13 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
             AppLogger.warning(TAG, "set: system Clock dispatch failed — $systemErr")
             return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
         }
-        val data = buildSetEnvelope(label, hour, minute, mode)
+        val data = buildSetEnvelope(label, target.hour, target.minute, mode)
             .put("system_alarm", "ok")
-        AppLogger.info(TAG, "set: time=$hour:$minute repeat=$mode label='$label' → system Clock")
+        AppLogger.info(
+            TAG,
+            "set: time=${target.hour}:${target.minute} date=${target.explicitDate} " +
+                "repeat=$mode label='$label' → system Clock",
+        )
         return emitEnvelope("set", data, args)
     }
 
@@ -267,42 +283,6 @@ class AlarmOffloadHandler(private val context: Context) : NativeOffloadHandler {
                 .toString()
             NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
         }
-    }
-
-    private fun parseHHMM(s: String): Pair<Int, Int>? {
-        val parts = s.split(":")
-        if (parts.size != 2) return null
-        val h = parts[0].toIntOrNull() ?: return null
-        val m = parts[1].toIntOrNull() ?: return null
-        if (h !in 0..23 || m !in 0..59) return null
-        return h to m
-    }
-
-    /**
-     * Accept HH:MM (parsed against today's calendar) or ISO 8601 like
-     * "2026-02-25T14:00", "2026-02-25T14:00:00Z". Both forms collapse to the
-     * (hour, minute) pair the manager expects — manager will roll forward to
-     * the next day if HH:MM is already past. Mirrors apple-alarm parseTime.
-     */
-    private fun parseTimeArg(s: String): Pair<Int, Int>? {
-        parseHHMM(s)?.let { return it }
-        // Try a few common ISO 8601 forms.
-        val patterns = listOf(
-            "yyyy-MM-dd'T'HH:mm:ss'Z'",
-            "yyyy-MM-dd'T'HH:mm:ssXXX",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm",
-        )
-        for (pat in patterns) {
-            val date = runCatching {
-                val sdf = SimpleDateFormat(pat, Locale.US)
-                if (pat.endsWith("'Z'")) sdf.timeZone = TimeZone.getTimeZone("UTC")
-                sdf.parse(s)
-            }.getOrNull() ?: continue
-            val cal = Calendar.getInstance().apply { time = date }
-            return cal.get(Calendar.HOUR_OF_DAY) to cal.get(Calendar.MINUTE)
-        }
-        return null
     }
 
     /**

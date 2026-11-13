@@ -814,6 +814,7 @@ fun ChatScreen(
     val memoryToolRecords by viewModel.memoryToolRecords.collectAsState()
     val selectedGroupName by viewModel.selectedGroupName.collectAsState()
     val providerName by viewModel.providerName.collectAsState()
+    val pendingLocalAction by viewModel.pendingLocalAction.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Shared 3-stage RECORD_AUDIO permission flow (system dialog → post-DENY
@@ -7877,6 +7878,13 @@ fun ChatScreen(
                         viewModel.setInputText("")
                         showClearChatDialog = false
                     },
+                )
+            }
+            pendingLocalAction?.let { action ->
+                LocalActionConfirmDialog(
+                    action = action,
+                    onConfirm = { choiceId -> viewModel.confirmLocalAction(choiceId) },
+                    onDismiss = { viewModel.cancelLocalAction() },
                 )
             }
             // [T-android-delete-from-here] Confirm before truncating. The cut

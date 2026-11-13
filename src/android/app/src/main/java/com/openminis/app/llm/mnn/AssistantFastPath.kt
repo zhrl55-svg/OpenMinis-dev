@@ -27,18 +27,13 @@ import java.util.Locale
  */
 object AssistantFastPath {
 
-    private const val PREFS = "assistant_fast_path"
-    private const val KEY_ENABLED = "enabled"
     private const val TRACE_FILE = "assistant_fastpath.log"
 
     /** 助理模式是否开启。默认关闭 —— 新路径不能默认改变现有行为。 */
-    fun isEnabled(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_ENABLED, false)
+    fun isEnabled(context: Context): Boolean = LocalAssistantPrefs.isEnabled(context)
 
     fun setEnabled(context: Context, on: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_ENABLED, on).apply()
+        LocalAssistantPrefs.setEnabled(context, on)
     }
 
     /**

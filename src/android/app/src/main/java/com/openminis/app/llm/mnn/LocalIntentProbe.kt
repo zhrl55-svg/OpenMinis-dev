@@ -10,7 +10,7 @@ import org.json.JSONObject
  * 端侧参数抽取的验收探针。
  *
  * 验收标准（不是演示）：
- *   1. 规则选工具：**必须全对**（8/8），否则端侧白搭。
+ *   1. 探针工具集内的规则选择必须全对，否则端侧白搭。
  *   2. 规则不命中：**必须全部转云端**（0 误触发）。
  *   3. 端侧抽参：抽出的值里必须包含期望的关键词（不是要求逐字相等，
  *      因为模型会加引号、换行、中文标点）。
@@ -48,7 +48,7 @@ object LocalIntentProbe {
         Case("打开网页 https://example.com/x", "browser_use", listOf("example.com")),
         // —— memory_write 抽 content
         Case("记住我更喜欢简短回答", "memory_write", listOf("简短")),
-        // —— 规则不该命中 → 转云端
+        // —— 不在探针工具集内：即使生活规则命中，也应返回 null 交给本地能力层
         Case("今天天气怎么样", null),
         Case("张掖西站怎么走", null),
         Case("你是谁", null),
@@ -138,7 +138,7 @@ object LocalIntentProbe {
 
         for (c in CASES) {
             val t0 = System.currentTimeMillis()
-            val ruleTool = planner.resolveTool(c.text, defs)
+            val ruleTool = planner.resolveTool(context, c.text, defs)
             val expectName = c.expectTool
 
             // 规则判定

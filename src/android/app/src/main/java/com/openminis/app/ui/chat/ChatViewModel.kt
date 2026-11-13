@@ -72,6 +72,7 @@ import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.awaitAll
@@ -11003,7 +11004,8 @@ class ChatViewModel(
     /**
      * [T-mnn-local] 助理模式的端侧快速路径。
      *
-     * 规则选工具 → 端侧 0.3B 抽参数 → 直接执行 → 写回一条助手消息。
+     * 可配置规则选能力 → 确定性槽位抽取 → 必要时端侧 0.3B 补自由文本
+     * → 直接执行 → 写回一条助手消息。
      * **全程不碰云端**，所以一条「运行 ls -la」的总耗时约 0.4s 推理 + 工具耗时。
      *
      * @return true = 已处理完（调用方不要再调 runAgentLoop）；
@@ -11011,9 +11013,9 @@ class ChatViewModel(
      *
      * ## 什么时候返回 false（每一条都是「云端更靠谱」的情形）
      * - 助理模式没开（默认关）
-     * - 端侧模型不可用（ABI 不是 arm64 / 模型文件没部署）
+     * - 该能力需要端侧补参，但模型不可用（ABI 不是 arm64 / 文件未部署）
      * - 规则没命中（闲聊、查询、多步任务都属于这类）
-     * - 端侧抽参不完整
+     * - 必填参数仍然不完整
      *
      * 端侧这条路**必须是失败即回退**：用户不该因为它的存在而得到更差的结果。
      */
@@ -11028,6 +11030,46 @@ class ChatViewModel(
      * 顺序上才是「先回答、再补一句为什么没用端侧」。
      */
     private var pendingFastPathNote: String? = null
+
+    private enum class LocalConfirmationOutcome { CONFIRMED, CANCELLED, TIMEOUT }
+    private data class LocalConfirmationResult(
+        val outcome: LocalConfirmationOutcome,
+        val choiceId: String? = null,
+    )
+
+    private val _pendingLocalAction = MutableStateFlow<LocalActionConfirmation?>(null)
+    val pendingLocalAction: StateFlow<LocalActionConfirmation?> =
+        _pendingLocalAction.asStateFlow()
+    private var localActionDeferred: CompletableDeferred<LocalConfirmationResult>? = null
+
+    /** Confirm the local write action currently shown in the chat. */
+    fun confirmLocalAction(choiceId: String? = null) {
+        val pending = _pendingLocalAction.value ?: return
+        if (pending.choices.isNotEmpty() &&
+            pending.choices.none { it.id == choiceId }
+        ) {
+            return
+        }
+        _pendingLocalAction.value = null
+        localActionDeferred?.complete(
+            LocalConfirmationResult(LocalConfirmationOutcome.CONFIRMED, choiceId),
+        )
+        AppLogger.info(
+            TAG,
+            "[T-assistant-routes] local action confirmed: " +
+                "${pending.capability}/${pending.action} choice=$choiceId",
+        )
+    }
+
+    /** Cancel or dismiss the local write action without executing it. */
+    fun cancelLocalAction() {
+        val pending = _pendingLocalAction.value ?: return
+        _pendingLocalAction.value = null
+        localActionDeferred?.complete(
+            LocalConfirmationResult(LocalConfirmationOutcome.CANCELLED),
+        )
+        AppLogger.info(TAG, "[T-assistant-routes] local action cancelled: ${pending.capability}/${pending.action}")
+    }
 
     /**
      * [T-mnn-local] 展示待提示的「端侧未接管」说明，然后清空。
@@ -11056,109 +11098,425 @@ class ChatViewModel(
             fastPath.trace(context, "skip: disabled")
             return false
         }
-
-        val model = com.openminis.app.llm.mnn.LocalMnnModel.get(context)
-        fastPath.trace(
-            context,
-            "enter enabled=true abi=${model.abiSupported()} model=${model.isAvailable()}",
-        )
-        if (!model.abiSupported()) {
-            fastPath.trace(context, "skip: abi-unsupported")
-            return false
-        }
-        if (!model.isAvailable()) {
-            fastPath.trace(context, "skip: model-missing")
-            return false
-        }
         if (!com.openminis.app.llm.mnn.LocalAssistantRouter.isPlainInstruction(userText)) {
             fastPath.trace(context, "skip: programmatic-envelope")
             return false
         }
 
-        val tools = com.openminis.app.tools.AgentTools.makeAgentTools()
-        val planner = com.openminis.app.llm.mnn.LocalIntentPlanner()
-        val def = planner.resolveTool(userText, tools)
-        if (def == null) {
-            fastPath.trace(context, "no-rule: 「${userText.take(60)}」")
+        val startedAt = System.currentTimeMillis()
+        val routes = com.openminis.app.assistant.routing.AssistantRouteStore.get(context).snapshot()
+        val router = com.openminis.app.assistant.routing.AssistantRouter()
+        var decision = router.route(userText, routes)
+        fastPath.trace(
+            context,
+            "route: enabled=true text=「${userText.take(60)}」 decision=${
+                when (val d = decision) {
+                    is com.openminis.app.assistant.routing.RouteDecision.Local ->
+                        "local ${d.capability}/${d.action} score=${d.score}"
+                    is com.openminis.app.assistant.routing.RouteDecision.Cloud ->
+                        "cloud reason=${d.reason}"
+                }
+            }",
+        )
+
+        if (decision is com.openminis.app.assistant.routing.RouteDecision.Cloud) {
+            com.openminis.app.assistant.routing.AssistantDiagnostics.record(
+                context,
+                userText,
+                decision.ranked,
+                decision,
+                System.currentTimeMillis() - startedAt,
+            )
+            if (decision.note != null) {
+                pendingFastPathNote = fastPath.cloudHandoffNote(decision.note)
+            }
             return false
         }
 
-        val extraction = withContext(Dispatchers.IO) {
-            planner.extractArgs(userText, def, model)
-        }
-        if (extraction == null) {
-            fastPath.trace(
-                context,
-                "no-args: tool=${def.name} raw=${planner.lastRaw.take(160)}",
+        var local = decision as com.openminis.app.assistant.routing.RouteDecision.Local
+        if (local.needsModelExtraction) {
+            val model = com.openminis.app.llm.mnn.LocalMnnModel.get(context)
+            if (!model.abiSupported() || !model.isAvailable()) {
+                fastPath.trace(context, "no-args: model-unavailable")
+                pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
+                com.openminis.app.assistant.routing.AssistantDiagnostics.record(
+                    context,
+                    userText,
+                    local.ranked,
+                    com.openminis.app.assistant.routing.RouteDecision.Cloud(
+                        "no-args",
+                        "no-args",
+                        local.ranked,
+                    ),
+                    System.currentTimeMillis() - startedAt,
+                )
+                return false
+            }
+            val def = com.openminis.app.tools.AgentTools.makeAgentTools()
+                .firstOrNull { it.name == local.capability }
+            if (def == null) {
+                fastPath.trace(context, "no-args: no-tool-definition ${local.capability}")
+                pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
+                return false
+            }
+            val planner = com.openminis.app.llm.mnn.LocalIntentPlanner()
+            val extraction = withContext(Dispatchers.IO) {
+                planner.extractArgs(userText, def, model)
+            }
+            if (extraction == null) {
+                fastPath.trace(
+                    context,
+                    "no-args: tool=${local.capability} raw=${planner.lastRaw.take(160)}",
+                )
+                pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
+                com.openminis.app.assistant.routing.AssistantDiagnostics.record(
+                    context,
+                    userText,
+                    local.ranked,
+                    com.openminis.app.assistant.routing.RouteDecision.Cloud(
+                        "no-args",
+                        "no-args",
+                        local.ranked,
+                    ),
+                    System.currentTimeMillis() - startedAt,
+                )
+                return false
+            }
+            val merged = JSONObject(local.args.toString())
+            val modelArgs = extraction.args
+            local.missingSlots.forEach { name ->
+                if (merged.optString(name).isBlank() && modelArgs.optString(name).isNotBlank()) {
+                    merged.put(name, modelArgs.optString(name))
+                }
+            }
+            modelArgs.optString("tool_title").takeIf { it.isNotBlank() }?.let {
+                merged.put("tool_title", it)
+            }
+            val required = com.openminis.app.assistant.routing.LocalCapabilityRegistry
+                .action(local.capability, local.action)?.requiredSlots.orEmpty()
+            val stillMissing = required.filter { merged.optString(it).isBlank() }.toSet()
+            if (stillMissing.isNotEmpty()) {
+                fastPath.trace(context, "no-args: missing=$stillMissing")
+                pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
+                return false
+            }
+            local = local.copy(
+                args = merged,
+                needsModelExtraction = false,
+                missingSlots = emptySet(),
             )
-            pendingFastPathNote = fastPath.cloudHandoffNote("no-args")
-            return false
         }
+
         if (!com.openminis.app.llm.mnn.LocalAssistantRouter.isSafe(
-                def.name,
-                extraction.args,
+                local.capability,
+                local.args,
                 userText,
             )
         ) {
             fastPath.trace(
                 context,
-                "unsafe: tool=${def.name} args=${extraction.args.toString().take(120)}",
+                "unsafe: tool=${local.capability} args=${local.args.toString().take(120)}",
+            )
+            val cloud = com.openminis.app.assistant.routing.RouteDecision.Cloud(
+                "unsafe",
+                "unsafe",
+                local.ranked,
+            )
+            com.openminis.app.assistant.routing.AssistantDiagnostics.record(
+                context,
+                userText,
+                local.ranked,
+                cloud,
+                System.currentTimeMillis() - startedAt,
             )
             pendingFastPathNote = fastPath.cloudHandoffNote("unsafe")
             return false
         }
 
-        val toolId = "local_" + java.util.UUID.randomUUID().toString()
-        val result = try {
-            executeTool(
-                name = extraction.tool,
-                argsJson = extraction.args.toString(),
-                toolId = toolId,
-                toolBlocks = mutableListOf(),
-                assistantId = java.util.UUID.randomUUID().toString(),
-                currentText = "",
+        val localExecutor = com.openminis.app.assistant.execution.LocalCapabilityExecutor(context)
+        val preparation = localExecutor.prepare(local)
+        if (preparation.error != null) {
+            val toolId = "local_" + java.util.UUID.randomUUID().toString()
+            val failure = com.openminis.app.assistant.execution.LocalExecutionResult(
+                output = preparation.error,
+                success = false,
+                toolName = local.capability,
+                title = local.route.label,
             )
-        } catch (t: Throwable) {
-            AppLogger.warning(TAG, "[T-mnn-local] tool ${extraction.tool} threw: ${t.javaClass.simpleName}: ${t.message}")
-            fastPath.trace(
+            runCatching {
+                persistLocalExecution(sessionId, local, toolId, failure, 0L)
+            }.onFailure {
+                AppLogger.warning(
+                    TAG,
+                    "[T-assistant-routes] persist preflight failure failed: ${it.message}",
+                )
+            }
+            com.openminis.app.assistant.routing.AssistantDiagnostics.record(
                 context,
-                "tool-threw: ${t.javaClass.simpleName}: ${t.message}",
+                userText,
+                local.ranked,
+                com.openminis.app.assistant.routing.RouteDecision.Cloud(
+                    "preflight-failed",
+                    null,
+                    local.ranked,
+                ),
+                System.currentTimeMillis() - startedAt,
             )
-            return false          // 工具炸了 → 让云端重试一次，别把半截结果丢给用户
+            fastPath.trace(context, "preflight-failed: ${preparation.error}")
+            return true
         }
+        local = preparation.decision
 
-        val summary = extraction.args.optString("tool_title").ifBlank { userText.take(12) }
-        val text = com.openminis.app.llm.mnn.AssistantFastPath.formatResult(
-            tool = extraction.tool,
-            summary = summary,
-            text = result.output,
-            isError = !result.success,
+        com.openminis.app.assistant.routing.AssistantDiagnostics.record(
+            context,
+            userText,
+            local.ranked,
+            local,
+            System.currentTimeMillis() - startedAt,
         )
 
-        val partsJson = """[{"type":"text","value":${ChatPartsJson.escapeJson(text)}}]"""
-        val row = runCatching {
-            chatRepository.appendMessage(sessionId, "assistant", partsJson)
-        }.getOrNull()
+        if (local.needsConfirmation) {
+            val choices = preparation.choices.map { event ->
+                LocalActionChoice(
+                    id = event.id.toString(),
+                    title = event.title.ifBlank { "（无标题日程）" },
+                    subtitle = listOf(
+                        event.start.replace('T', ' ').removeSuffix(":00").take(16),
+                        event.location,
+                    ).filter { it.isNotBlank() }.joinToString(" · "),
+                )
+            }
+            val confirmation = awaitLocalActionConfirmation(userText, local, choices)
+            if (confirmation.outcome != LocalConfirmationOutcome.CONFIRMED) {
+                fastPath.trace(context, "confirmation: ${confirmation.outcome.name.lowercase()}")
+                withContext(Dispatchers.Main) {
+                    appendSystemInfo(
+                        when (confirmation.outcome) {
+                            LocalConfirmationOutcome.TIMEOUT -> "本地操作等待确认超时，已取消。"
+                            else -> "已取消本地操作。"
+                        },
+                        "info",
+                    )
+                }
+                return true
+            }
+            confirmation.choiceId?.let { choiceId ->
+                local = local.copy(
+                    args = JSONObject(local.args.toString()).put("id", choiceId),
+                )
+            }
+        }
 
+        val toolId = "local_" + java.util.UUID.randomUUID().toString()
+        val isReadOnly = com.openminis.app.assistant.routing.LocalCapabilityRegistry
+            .isReadOnly(local.capability, local.action)
+        val execStarted = System.currentTimeMillis()
+        val execution = try {
+            executeLocalCapability(local, sessionId, toolId)
+        } catch (t: Throwable) {
+            AppLogger.warning(
+                TAG,
+                "[T-assistant-routes] ${local.capability}/${local.action} threw: " +
+                    "${t.javaClass.simpleName}: ${t.message}",
+            )
+            fastPath.trace(
+                context,
+                "tool-threw: ${local.capability}/${local.action} ${t.javaClass.simpleName}: ${t.message}",
+            )
+            if (isReadOnly) {
+                // A read is idempotent: let the cloud retry it. Never retry a
+                // write after it may have reached the calendar/alarm/note store.
+                return false
+            }
+            com.openminis.app.assistant.execution.LocalExecutionResult(
+                output = "本地执行失败：${t.message ?: t.javaClass.simpleName}",
+                success = false,
+                toolName = local.capability,
+                title = local.route.label,
+            )
+        }
+        val elapsed = System.currentTimeMillis() - execStarted
+
+        if (!execution.success && isReadOnly) {
+            fastPath.trace(context, "read-failed -> cloud: ${execution.output.take(160)}")
+            return false
+        }
+
+        // From this point on a write may already have happened. Persistence
+        // problems must be logged, never turned into a cloud retry.
+        runCatching {
+            persistLocalExecution(sessionId, local, toolId, execution, elapsed)
+        }.onFailure {
+            AppLogger.warning(
+                TAG,
+                "[T-assistant-routes] persist local result failed: ${it.message}",
+            )
+        }
+
+        AppLogger.info(
+            TAG,
+            "[T-assistant-routes] handled locally: ${local.capability}/${local.action} " +
+                "success=${execution.success} len=${execution.output.length}",
+        )
+        fastPath.trace(
+            context,
+            "handled: ${local.capability}/${local.action} success=${execution.success} " +
+                "len=${execution.output.length} elapsed=${elapsed}ms",
+        )
+        return true
+    }
+
+    private suspend fun executeLocalCapability(
+        decision: com.openminis.app.assistant.routing.RouteDecision.Local,
+        sessionId: String,
+        toolId: String,
+    ): com.openminis.app.assistant.execution.LocalExecutionResult {
+        val lifeCapabilities = setOf(
+            "calendar", "alarm", "reminder", "note", "settings",
+            "scheduled_task", "weather", "device", "media", "contacts", "app_launch",
+        )
+        if (decision.capability in lifeCapabilities) {
+            return com.openminis.app.assistant.execution.LocalCapabilityExecutor(context)
+                .execute(decision, sessionId)
+        }
+        val result = executeTool(
+            name = decision.capability,
+            argsJson = decision.args.toString(),
+            toolId = toolId,
+            toolBlocks = mutableListOf(),
+            assistantId = java.util.UUID.randomUUID().toString(),
+            currentText = "",
+        )
+        return com.openminis.app.assistant.execution.LocalExecutionResult(
+            output = result.output,
+            success = result.success,
+            toolName = decision.capability,
+            title = result.toolTitle.ifBlank {
+                decision.args.optString("tool_title").ifBlank { decision.route.label }
+            },
+        )
+    }
+
+    private suspend fun awaitLocalActionConfirmation(
+        userText: String,
+        decision: com.openminis.app.assistant.routing.RouteDecision.Local,
+        choices: List<LocalActionChoice> = emptyList(),
+    ): LocalConfirmationResult {
+        val deferred = CompletableDeferred<LocalConfirmationResult>()
+        localActionDeferred?.complete(
+            LocalConfirmationResult(LocalConfirmationOutcome.CANCELLED),
+        )
+        localActionDeferred = deferred
+        val title = decision.route.label
+        val summary = decision.summary.ifBlank {
+            decision.args.optString("tool_title").ifBlank { userText.take(80) }
+        }
+        val destructive = com.openminis.app.assistant.routing.LocalCapabilityRegistry
+            .isHighRisk(decision.capability, decision.action)
+        val detail = buildString {
+            append(decision.capability).append('/').append(decision.action)
+            if (decision.ambiguousTime) {
+                append("\n时间信息不够明确，请核对上面的时间后再确认。")
+            }
+        }
+        val pending = LocalActionConfirmation(
+            id = java.util.UUID.randomUUID().toString(),
+            title = title,
+            summary = summary,
+            detail = detail,
+            capability = decision.capability,
+            action = decision.action,
+            destructive = destructive,
+            choices = choices,
+        )
+        withContext(Dispatchers.Main) {
+            _pendingLocalAction.value = pending
+        }
+        return try {
+            withTimeoutOrNull(60_000L) { deferred.await() }
+                ?: LocalConfirmationResult(LocalConfirmationOutcome.TIMEOUT)
+        } finally {
+            withContext(Dispatchers.Main) {
+                if (_pendingLocalAction.value?.id == pending.id) {
+                    _pendingLocalAction.value = null
+                }
+            }
+            if (localActionDeferred === deferred) localActionDeferred = null
+            if (!deferred.isCompleted) {
+                deferred.complete(
+                    LocalConfirmationResult(LocalConfirmationOutcome.CANCELLED),
+                )
+            }
+        }
+    }
+
+    private suspend fun persistLocalExecution(
+        sessionId: String,
+        decision: com.openminis.app.assistant.routing.RouteDecision.Local,
+        toolId: String,
+        execution: com.openminis.app.assistant.execution.LocalExecutionResult,
+        elapsedMs: Long,
+    ) {
+        val block = AssistantBlock(
+            id = toolId,
+            kind = "tool_use",
+            content = execution.output,
+            toolStatus = if (execution.success) ToolBlockStatus.SUCCESS else ToolBlockStatus.FAILED,
+            toolTitle = execution.title,
+            toolName = decision.capability,
+            toolArgs = decision.args.toString(),
+            durationMs = elapsedMs,
+            startTimeMs = System.currentTimeMillis() - elapsedMs,
+        )
+        val header = if (execution.success) {
+            "✅ ${execution.title}"
+        } else {
+            "⚠️ ${execution.title} 失败"
+        }
+        val parts = listOf(
+            AgentContentPart.Text(header),
+            AgentContentPart.ToolUse(toolId, decision.capability, decision.args),
+        )
+        val dbId = persistAssistantTurn(
+            parts = parts,
+            usage = null,
+            toolBlockMeta = mapOf(toolId to block),
+        )
+        if (dbId == null || agentHistory.none { it.dbMessageId == dbId }) {
+            agentHistory.add(
+                LLMMessage(
+                    role = LLMMessage.Role.ASSISTANT,
+                    content = header,
+                    contentParts = parts,
+                    dbMessageId = dbId,
+                ),
+            )
+        }
         val bubble = ChatMessage(
-            id = row?.id ?: "local_${System.currentTimeMillis()}",
+            id = dbId ?: "local_${System.currentTimeMillis()}",
             role = "assistant",
-            content = text,
+            content = header,
+            toolBlocks = listOf(block),
         )
         withContext(Dispatchers.Main) {
             _messages.value = _messages.value + bubble
         }
 
-        AppLogger.info(
-            TAG,
-            "[T-mnn-local] handled locally: tool=${extraction.tool} success=${result.success} " +
-                "len=${result.output.length}",
+        val toolResult = ToolExecutionResult(
+            output = execution.output,
+            success = execution.success,
+            toolTitle = execution.title,
         )
-        fastPath.trace(
-            context,
-            "handled: tool=${extraction.tool} success=${result.success} len=${result.output.length}",
+        val resultParts = listOf(
+            ToolResultWrap.part(toolId, decision.capability, execution.output, toolResult),
         )
-        return true
+        val resultDbId = persistToolResultMessage(
+            parts = resultParts,
+            durationsMs = mapOf(toolId to elapsedMs),
+        )
+        if (resultDbId == null || agentHistory.none { it.dbMessageId == resultDbId }) {
+            agentHistory.add(ToolResultWrap.historyMessage(resultParts, resultDbId))
+        }
     }
 
     private suspend fun runAgentLoop(

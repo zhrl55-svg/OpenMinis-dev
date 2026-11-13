@@ -86,7 +86,7 @@ object LocalAssistantRouter {
         if (!model.abiSupported() || !model.isAvailable()) return null
 
         val planner = LocalIntentPlanner()
-        val def = planner.resolveTool(text, tools) ?: return null
+        val def = planner.resolveTool(context, text, tools) ?: return null
         val extraction = planner.extractArgs(text, def, model) ?: return null
 
         val args = extraction.args

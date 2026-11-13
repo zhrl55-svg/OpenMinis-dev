@@ -51,6 +51,7 @@ import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -97,6 +98,7 @@ fun SettingsScreen(
     onSkillsClick: () -> Unit = {},
     onTerminalClick: () -> Unit = {},
     onMemoryClick: () -> Unit = {},
+    onAssistantRoutesClick: () -> Unit = {},
     /** [T-p2-agent-settings] Settings › Agents (delegation on/off), below Memory. */
     onAgentsClick: () -> Unit = {},
     onAgentToolsClick: () -> Unit = {},
@@ -277,6 +279,14 @@ fun SettingsScreen(
                         localAssistantMode = on
                         com.openminis.app.llm.mnn.LocalAssistantPrefs.setEnabled(context, on)
                     },
+                    showDivider = true,
+                )
+                SettingsItem(
+                    icon = Icons.Outlined.Tune,
+                    iconColor = Color(0xFF5856D6),
+                    title = stringResource(R.string.settings_assistant_routes),
+                    subtitle = stringResource(R.string.settings_assistant_routes_subtitle),
+                    onClick = onAssistantRoutesClick,
                     showDivider = false,
                 )
             }

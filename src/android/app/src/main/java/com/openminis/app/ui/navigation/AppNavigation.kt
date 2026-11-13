@@ -183,6 +183,8 @@ object Routes {
     const val MCP = "mcp"
     /** [T-soul-md] SOUL.md editor. */
     const val SOUL = "soul"
+    /** User-editable local assistant routes, reachable from Settings. */
+    const val ASSISTANT_ROUTES = "settings/assistant-routes"
     const val MEMORY_FILE_EDIT = "memory_file/{fileName}/{isGlobal}"
     const val PERMISSIONS = "permissions"
     /**
@@ -662,6 +664,7 @@ fun AppNavigation(
                 onSkillsClick = { navController.safeNavigate(Routes.SKILLS) },
                 onTerminalClick = { navController.safeNavigate(Routes.terminal()) },
                 onMemoryClick = { navController.safeNavigate(Routes.MEMORY) },
+                onAssistantRoutesClick = { navController.safeNavigate(Routes.ASSISTANT_ROUTES) },
                 onAgentsClick = { navController.safeNavigate(Routes.AGENTS) },
                 onAgentToolsClick = { navController.safeNavigate(Routes.AGENT_TOOLS) },
                 onMcpClick = { navController.safeNavigate(Routes.MCP) },
@@ -1436,6 +1439,12 @@ fun AppNavigation(
         // [T-soul-md] SOUL.md editor.
         composable(Routes.SOUL) {
             com.openminis.app.ui.settings.SoulSettingsScreen(
+                onBack = { navController.safePopBackStack() },
+            )
+        }
+
+        composable(Routes.ASSISTANT_ROUTES) {
+            com.openminis.app.ui.settings.AssistantRoutesScreen(
                 onBack = { navController.safePopBackStack() },
             )
         }

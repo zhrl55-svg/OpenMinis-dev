@@ -351,6 +351,30 @@ enum class ToolBlockStatus {
     STREAMING, PENDING, RUNNING, SUCCESS, FAILED, CANCELLED, TIMEOUT
 }
 
+/**
+ * A write action that the local assistant stopped before execution. The
+ * ViewModel keeps one of these pending while the chat asks the user to
+ * confirm; no capability runs until [ChatViewModel.confirmLocalAction]
+ * resolves it.
+ */
+data class LocalActionConfirmation(
+    val id: String,
+    val title: String,
+    val summary: String,
+    val detail: String,
+    val capability: String,
+    val action: String,
+    val destructive: Boolean,
+    val choices: List<LocalActionChoice> = emptyList(),
+)
+
+/** One selectable result when a local write matches more than one record. */
+data class LocalActionChoice(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+)
+
 /** Slash command descriptor shown in the "/" popup. Mirrors iOS SlashCommand. */
 data class SlashCommand(
     val id: String,

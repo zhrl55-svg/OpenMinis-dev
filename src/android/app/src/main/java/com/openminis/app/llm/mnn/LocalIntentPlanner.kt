@@ -9,15 +9,15 @@ import org.json.JSONObject
  *
  * ## 分工：规则选工具，端侧抽参数
  *
- * 2026-11-13 实测（`LocalIntentProbe`，11 条用例）：
- * - 规则圈候选：**8/8 全对**，3/3 正确地「不命中 → 转云端」，0 误触发。
+ * 历史探针实测（`LocalIntentProbe`）：
+ * - 规则圈候选基本全对，无关说法正确地「不命中 → 转云端」，0 误触发。
  * - 端侧自己选工具：**1/8**。它会照抄 few-shot 的工具名，或把用户话里的词
  *   当工具名编出来（`echo` / `python\_run` / `file_modifier` / `web_opening`）。
  * - 但端侧**抽值很准**：`"path":"/var/minis/memory/GLOBAL.md"` 抽对了，
  *   `"tool_title":"执行Echohello"` 也把命令抓出来了，只是放错了字段。
  *
  * 结论：**0.3B 不会「从列表里选」，但会「从一句话里找值」。**
- * 所以工具名由规则决定，端侧只负责把参数值抽出来 —— 任务简单一个量级，
+ * 所以工具名由可配置规则决定，端侧只负责给自由文本槽位补值 —— 任务简单一个量级，
  * 0.3B 完全够用。
  *
  * ## prompt 为什么这么短
@@ -43,32 +43,6 @@ class LocalIntentPlanner {
     /** 最近一次抽取的模型原始输出（调试/验收用）。 */
     var lastRaw: String = ""
         private set
-
-    /**
-     * 中文关键词 → 工具名。
-     *
-     * 只放**信号强**的词：命中即说明用户明确要动那个工具。
-     * 弱信号（「查」「看」）不进来 —— 它们出现得太泛，命中了反而把候选集撑大。
-     *
-     * 顺序即优先级：一条指令只对应一个工具，靠前的先匹配。
-     */
-    private val ruleHints: List<Pair<List<String>, String>> = listOf(
-        listOf("运行", "执行", "跑一下", "跑个", "命令", "终端", "shell", "脚本") to "shell_execute",
-        listOf("读一下", "读取", "打开文件", "看看文件", "文件内容", "读文件") to "file_read",
-        listOf("写入", "写文件", "保存到", "存到", "新建文件", "写一个") to "file_write",
-        listOf("修改", "编辑文件", "改一下", "改成", "替换掉", "编辑") to "file_edit",
-        listOf("网页", "浏览器", "打开网址", "上网查", "搜网页") to "browser_use",
-        listOf("记住", "记一下", "存进记忆", "别忘了") to "memory_write",
-        listOf("我说过", "我的记忆", "之前说过", "查记忆") to "memory_get",
-        listOf("另一台电脑", "远程电脑", "那台机器", "远程执行") to "hub_call",
-        listOf("这张图", "看图", "图片内容", "识别图") to "read_image",
-        // 地点查询：周边/附近/找个 这类问法。放在最后 —— 前面几条的关键词更具体，
-        // 命中它们时不应该被这里抢走。
-        listOf(
-            "附近", "周边", "周围", "旁边", "最近的", "找一家", "找个", "有哪些",
-            "在哪有", "有没有", "地址是", "怎么去",
-        ) to "amap_search",
-    )
 
     /**
      * few-shot 示例。
@@ -166,18 +140,25 @@ class LocalIntentPlanner {
     }
 
     /**
-     * 规则选工具。
+     * Resolve an existing agent tool through the same user-editable route
+     * store the chat fast path uses. The old hard-coded `ruleHints` list is
+     * deliberately gone: editing a keyword in Settings must be the only way
+     * to change this decision.
      *
-     * @return 命中的工具；null = 规则不命中 → 直接转云端
+     * @return the selected tool, or null when no enabled route maps to one of
+     *   the supplied tools (the caller falls back to the cloud).
      */
-    fun resolveTool(userText: String, tools: List<AgentToolDefinition>): AgentToolDefinition? {
-        val byName = tools.associateBy { it.name }
-        for ((keys, toolName) in ruleHints) {
-            if (keys.any { userText.contains(it) }) {
-                byName[toolName]?.let { return it }
-            }
-        }
-        return null
+    fun resolveTool(
+        context: android.content.Context,
+        userText: String,
+        tools: List<AgentToolDefinition>,
+    ): AgentToolDefinition? {
+        val routes = com.openminis.app.assistant.routing.AssistantRouteStore.get(context).snapshot()
+        val best = com.openminis.app.assistant.routing.AssistantRouteMatcher
+            .rank(userText, routes)
+            .firstOrNull { it.score >= com.openminis.app.assistant.routing.AssistantRouteMatcher.MIN_SCORE }
+            ?: return null
+        return tools.firstOrNull { it.name == best.route.capability }
     }
 
     /**

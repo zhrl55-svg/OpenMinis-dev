@@ -23,12 +23,37 @@ object LocalAssistantPrefs {
     /** 开关的键。 */
     const val KEY_ENABLED = "enabled"
 
+    private const val LEGACY_PREFS_NAME = "assistant_fast_path"
+    private const val LEGACY_KEY_ENABLED = "enabled"
+    private const val MIGRATION_KEY = "legacy_fast_path_migrated"
+
     /** 助理模式是否开启。 */
-    fun isEnabled(context: Context): Boolean =
-        prefs(context).getBoolean(KEY_ENABLED, false)
+    fun isEnabled(context: Context): Boolean {
+        val prefs = prefs(context)
+        if (!prefs.getBoolean(MIGRATION_KEY, false)) {
+            migrateLegacyValue(context, prefs)
+        }
+        return prefs.getBoolean(KEY_ENABLED, false)
+    }
 
     fun setEnabled(context: Context, enabled: Boolean) {
-        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
+        prefs(context).edit()
+            .putBoolean(KEY_ENABLED, enabled)
+            .putBoolean(MIGRATION_KEY, true)
+            .apply()
+    }
+
+    private fun migrateLegacyValue(
+        context: Context,
+        current: android.content.SharedPreferences,
+    ) {
+        val legacy = context.applicationContext
+            .getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+        val editor = current.edit().putBoolean(MIGRATION_KEY, true)
+        if (legacy.contains(LEGACY_KEY_ENABLED)) {
+            editor.putBoolean(KEY_ENABLED, legacy.getBoolean(LEGACY_KEY_ENABLED, false))
+        }
+        editor.apply()
     }
 
     private fun prefs(context: Context) =
