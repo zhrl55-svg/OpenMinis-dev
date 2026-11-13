@@ -182,3 +182,6 @@ hub.json
 zz.txt
 ui2.xml
 .workbuddy/
+
+# codebase-index cache (machine-local; do not commit)
+.claude/cache/codebase-index/
