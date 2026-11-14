@@ -193,6 +193,9 @@ class TextToSpeechManager : TextToSpeech.OnInitListener {
                 // American English for everyone.
                 applyResolvedLocale(TtsLocaleResolver.resolve("", savedAppLanguageTag()))
                 setOnUtteranceProgressListener(createProgressListener())
+            // [T-music-player-top] Let the music player know when the app is
+            // speaking, so it can duck instead of burying the answer.
+            VoiceOutputState.registerSpeechSource(this@TextToSpeechManager)
             }
             Log.d(TAG, "TTS initialized successfully")
             // Replay whatever arrived while the engine was binding, in order.

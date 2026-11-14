@@ -116,6 +116,16 @@ class ChatViewModel(
 ) : ViewModel() {
 
     companion object {
+        /**
+         * [T-confirm-card-auto-dismiss] How long a local-write confirmation
+         * card waits for an answer before it cancels itself.
+         *
+         * The voice prompt + one retry finishes well inside this window; a
+         * user who walked away or changed their mind gets the card out of
+         * the way instead of a chat stuck waiting on it.
+         */
+        private const val LOCAL_CONFIRM_TIMEOUT_MS = 15_000L
+
         /** [T-stop-choice] Tools that never run a shell command: stopping only them leaves the shells alone. */
         private val SHELL_FREE_TOOLS = setOf(
             com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME,
@@ -9479,6 +9489,23 @@ class ChatViewModel(
     }
 
     fun sendMessage(text: String) {
+        // 确认卡挂着时，一句短「确认/取消」（键盘或按住说话）应当落到卡片上，
+        // 而不是变成一条新的聊天消息。
+        if (_pendingLocalAction.value != null &&
+            com.openminis.app.assistant.execution.LocalActionSpeech.isDirectAnswer(text)
+        ) {
+            when (com.openminis.app.assistant.execution.LocalActionSpeech.decision(text)) {
+                com.openminis.app.assistant.execution.VoiceConfirmationDecision.CONFIRM -> {
+                    confirmLocalAction(source = "text")
+                    return
+                }
+                com.openminis.app.assistant.execution.VoiceConfirmationDecision.CANCEL -> {
+                    cancelLocalAction(source = "text")
+                    return
+                }
+                com.openminis.app.assistant.execution.VoiceConfirmationDecision.UNCLEAR -> Unit
+            }
+        }
         // [T-android-stop-sibling-subagent] New work in this session lifts the
         // stop: delegations from here on may drive the turn again.
         com.openminis.app.agent.jobs.AgentJobRegistry.clearDelegationMute(activeSessionId)
@@ -11042,14 +11069,26 @@ class ChatViewModel(
         _pendingLocalAction.asStateFlow()
     private var localActionDeferred: CompletableDeferred<LocalConfirmationResult>? = null
 
+    /** 写操作的语音确认：念出动作、听「确认/取消」。见 LocalActionVoiceConfirmer。 */
+    private val localActionVoice = com.openminis.app.ui.chat.voice.LocalActionVoiceConfirmer(context)
+
+    /** 语音确认当前在聆听还是在播报；确认卡用它显示状态。 */
+    val localVoiceConfirmPhase: StateFlow<com.openminis.app.ui.chat.voice.VoiceConfirmPhase> =
+        localActionVoice.phase
+
+    /** 当前卡片在 LocalConfirmationBridge 里的注册 id（唤醒链路用）。 */
+    private var localConfirmBridgeId: String? = null
+
     /** Confirm the local write action currently shown in the chat. */
-    fun confirmLocalAction(choiceId: String? = null) {
+    fun confirmLocalAction(choiceId: String? = null, source: String = "touch") {
         val pending = _pendingLocalAction.value ?: return
         if (pending.choices.isNotEmpty() &&
             pending.choices.none { it.id == choiceId }
         ) {
             return
         }
+        localActionVoice.stop()
+        com.openminis.app.llm.mnn.AssistantFastPath.trace(context, "confirm-input: $source-confirm")
         _pendingLocalAction.value = null
         localActionDeferred?.complete(
             LocalConfirmationResult(LocalConfirmationOutcome.CONFIRMED, choiceId),
@@ -11057,18 +11096,20 @@ class ChatViewModel(
         AppLogger.info(
             TAG,
             "[T-assistant-routes] local action confirmed: " +
-                "${pending.capability}/${pending.action} choice=$choiceId",
+                "${pending.capability}/${pending.action} choice=$choiceId source=$source",
         )
     }
 
     /** Cancel or dismiss the local write action without executing it. */
-    fun cancelLocalAction() {
+    fun cancelLocalAction(source: String = "touch") {
         val pending = _pendingLocalAction.value ?: return
+        localActionVoice.stop()
+        com.openminis.app.llm.mnn.AssistantFastPath.trace(context, "confirm-input: $source-cancel")
         _pendingLocalAction.value = null
         localActionDeferred?.complete(
             LocalConfirmationResult(LocalConfirmationOutcome.CANCELLED),
         )
-        AppLogger.info(TAG, "[T-assistant-routes] local action cancelled: ${pending.capability}/${pending.action}")
+        AppLogger.info(TAG, "[T-assistant-routes] local action cancelled: ${pending.capability}/${pending.action} source=$source")
     }
 
     /**
@@ -11242,6 +11283,7 @@ class ChatViewModel(
                 success = false,
                 toolName = local.capability,
                 title = local.route.label,
+                answer = preparation.error,
             )
             runCatching {
                 persistLocalExecution(sessionId, local, toolId, failure, 0L)
@@ -11263,6 +11305,14 @@ class ChatViewModel(
                 System.currentTimeMillis() - startedAt,
             )
             fastPath.trace(context, "preflight-failed: ${preparation.error}")
+            localActionVoice.announceCompletion(
+                capability = local.capability,
+                action = local.action,
+                fallbackLabel = local.route.label,
+                args = local.args,
+                success = false,
+                output = preparation.error,
+            )
             return true
         }
         local = preparation.decision
@@ -11286,7 +11336,7 @@ class ChatViewModel(
                     ).filter { it.isNotBlank() }.joinToString(" · "),
                 )
             }
-            val confirmation = awaitLocalActionConfirmation(userText, local, choices)
+            val confirmation = awaitLocalActionConfirmation(userText, local, sessionId, choices)
             if (confirmation.outcome != LocalConfirmationOutcome.CONFIRMED) {
                 fastPath.trace(context, "confirmation: ${confirmation.outcome.name.lowercase()}")
                 withContext(Dispatchers.Main) {
@@ -11298,6 +11348,7 @@ class ChatViewModel(
                         "info",
                     )
                 }
+                localActionVoice.announceCancelled()
                 return true
             }
             confirmation.choiceId?.let { choiceId ->
@@ -11333,6 +11384,7 @@ class ChatViewModel(
                 success = false,
                 toolName = local.capability,
                 title = local.route.label,
+                answer = "本地执行失败：${t.message ?: t.javaClass.simpleName}",
             )
         }
         val elapsed = System.currentTimeMillis() - execStarted
@@ -11363,6 +11415,17 @@ class ChatViewModel(
             "handled: ${local.capability}/${local.action} success=${execution.success} " +
                 "len=${execution.output.length} elapsed=${elapsed}ms",
         )
+        // 经过确认的写操作完成后简短播报结果（语音场景闭环）。
+        if (local.needsConfirmation) {
+            localActionVoice.announceCompletion(
+                capability = local.capability,
+                action = local.action,
+                fallbackLabel = execution.title,
+                args = local.args,
+                success = execution.success,
+                output = execution.output,
+            )
+        }
         return true
     }
 
@@ -11394,12 +11457,19 @@ class ChatViewModel(
             title = result.toolTitle.ifBlank {
                 decision.args.optString("tool_title").ifBlank { decision.route.label }
             },
+            answer = com.openminis.app.assistant.execution.LocalResultFormatter.answer(
+                capability = decision.capability,
+                action = decision.action,
+                output = result.output,
+                success = result.success,
+            ),
         )
     }
 
     private suspend fun awaitLocalActionConfirmation(
         userText: String,
         decision: com.openminis.app.assistant.routing.RouteDecision.Local,
+        sessionId: String,
         choices: List<LocalActionChoice> = emptyList(),
     ): LocalConfirmationResult {
         val deferred = CompletableDeferred<LocalConfirmationResult>()
@@ -11428,14 +11498,40 @@ class ChatViewModel(
             action = decision.action,
             destructive = destructive,
             choices = choices,
+            timeoutSeconds = (LOCAL_CONFIRM_TIMEOUT_MS / 1000).toInt(),
         )
         withContext(Dispatchers.Main) {
             _pendingLocalAction.value = pending
         }
-        return try {
-            withTimeoutOrNull(60_000L) { deferred.await() }
+        // 语音唤醒跑在另一条会话里：注册一个桥，让唤醒转写出的「确认」
+        // 落回这张卡片，而不是在新会话里重新发一条消息。
+        localConfirmBridgeId = pending.id
+        com.openminis.app.assistant.execution.LocalConfirmationBridge.register(
+            id = pending.id,
+            sessionId = sessionId,
+            confirm = { confirmLocalAction(source = "voice-wake") },
+            cancel = { cancelLocalAction(source = "voice-wake") },
+        )
+        // 语音确认与卡片并行：立刻开麦听「确认/取消」，没听到再播报提示。
+        com.openminis.app.llm.mnn.AssistantFastPath.trace(
+            context,
+            "confirm-wait: ${decision.capability}/${decision.action} choices=${choices.size}",
+        )
+        localActionVoice.start(pending) { confirmed ->
+            if (confirmed) {
+                confirmLocalAction(source = "voice")
+            } else {
+                cancelLocalAction(source = "voice")
+            }
+        }
+        val result = try {
+            withTimeoutOrNull(LOCAL_CONFIRM_TIMEOUT_MS) { deferred.await() }
                 ?: LocalConfirmationResult(LocalConfirmationOutcome.TIMEOUT)
         } finally {
+            localActionVoice.stop()
+            com.openminis.app.assistant.execution.LocalConfirmationBridge
+                .unregister(pending.id)
+            if (localConfirmBridgeId == pending.id) localConfirmBridgeId = null
             withContext(Dispatchers.Main) {
                 if (_pendingLocalAction.value?.id == pending.id) {
                     _pendingLocalAction.value = null
@@ -11448,6 +11544,11 @@ class ChatViewModel(
                 )
             }
         }
+        com.openminis.app.llm.mnn.AssistantFastPath.trace(
+            context,
+            "confirm-result: ${result.outcome.name.lowercase()}",
+        )
+        return result
     }
 
     private suspend fun persistLocalExecution(
@@ -11473,8 +11574,16 @@ class ChatViewModel(
         } else {
             "⚠️ ${execution.title} 失败"
         }
+        // 气泡正文必须带上结果（例如天气信息）；工具块只放原始输出供展开查看。
+        // 旧版快速路径用 AssistantFastPath.formatResult 做过这件事，路由改造后丢了，
+        // 导致「今天天气怎么样」只回复了一个 Word 级别标题。
+        val text = if (execution.answer.isNotBlank()) {
+            "$header\n\n${execution.answer}"
+        } else {
+            header
+        }
         val parts = listOf(
-            AgentContentPart.Text(header),
+            AgentContentPart.Text(text),
             AgentContentPart.ToolUse(toolId, decision.capability, decision.args),
         )
         val dbId = persistAssistantTurn(
@@ -11486,7 +11595,7 @@ class ChatViewModel(
             agentHistory.add(
                 LLMMessage(
                     role = LLMMessage.Role.ASSISTANT,
-                    content = header,
+                    content = text,
                     contentParts = parts,
                     dbMessageId = dbId,
                 ),
@@ -11495,7 +11604,7 @@ class ChatViewModel(
         val bubble = ChatMessage(
             id = dbId ?: "local_${System.currentTimeMillis()}",
             role = "assistant",
-            content = header,
+            content = text,
             toolBlocks = listOf(block),
         )
         withContext(Dispatchers.Main) {
@@ -18720,6 +18829,11 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             com.openminis.app.agent.jobs.AgentJobRegistry.unregisterQueuedStarter(key)
             com.openminis.app.agent.jobs.AgentJobRegistry.unregisterInterruptedCounter(key)
         }
+        localActionVoice.release()
+        localConfirmBridgeId?.let {
+            com.openminis.app.assistant.execution.LocalConfirmationBridge.unregister(it)
+        }
+        localConfirmBridgeId = null
         super.onCleared()
         // Tear down whichever shell was actually serving this VM. Terminate
         // both ids when the rename happened, since a draft shell may still

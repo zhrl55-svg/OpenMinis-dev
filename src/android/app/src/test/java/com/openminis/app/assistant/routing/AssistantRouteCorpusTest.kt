@@ -118,6 +118,8 @@ class AssistantRouteCorpusTest {
         // Weather, device, media, contacts, app
         local("今天天气怎么样", "weather", "current"),
         local("what's the weather", "weather", "current"),
+        local("明天会下雨吗", "weather", "current"),
+        local("weather", "weather", "current"),
         local("电量还剩多少", "device", "battery"),
         local("battery level", "device", "battery"),
         local("剩余空间多少", "device", "storage"),
@@ -130,6 +132,13 @@ class AssistantRouteCorpusTest {
         local("停止播放", "media", "stop"),
         local("播放状态", "media", "status"),
         local("播放列表", "media", "list"),
+        // Music player (T-music-player-top)
+        local("播放音乐", "media", "play"),
+        local("放一首周杰伦的稻香", "media", "play"),
+        local("播放周杰伦的歌", "media", "play"),
+        local("来首歌", "media", "play"),
+        local("下一首", "media", "next"),
+        local("上一首", "media", "previous"),
         local("打电话给张三", "contacts", "dial"),
         local("直接拨打张三", "contacts", "dial"),
         local("call Alice Wang", "contacts", "dial"),
@@ -152,6 +161,14 @@ class AssistantRouteCorpusTest {
         cloud("tell me a story"),
         cloud("谢谢"),
         cloud("晚安"),
+        // 提到「天气」/「电池」不等于要查询：长句或讨论性语境留在云端。
+        cloud("可以直接对接高德地图的天气接口"),
+        cloud("天气完成了过程，没有把结果显示出来"),
+        cloud("我们在讨论天气接口的方案"),
+        // 「播放」出现在技术讨论里时是话题，不是点歌。
+        cloud("音乐播放逻辑"),
+        cloud("播放器的设计"),
+        cloud("帮我分析一下播放器的架构"),
         cloud("打开"),
         cloud("提醒我"),
         cloud("明天"),
@@ -190,20 +207,42 @@ class AssistantRouteCorpusTest {
         assertTrue(failures.joinToString("\n"), failures.isEmpty())
     }
 
+    /**
+     * [T-assistant-confirm-destructive-only] Only destructive actions ask for
+     * a confirmation card. A create or a playback command runs right away -
+     * asking twice for "设个闹钟" costs more than the alarm does.
+     */
     @Test
-    fun `life writes require confirmation by default`() {
-        val writes = listOf(
+    fun `destructive actions require confirmation`() {
+        val destructive = listOf(
+            "删除日程 项目评审",
+            "取消提醒 会议",
+            "删除笔记 3",
+            "把亮度调到50%",
+            "打电话给张三",
+            "运行命令 ls -la /var/minis",
+        )
+        for (text in destructive) {
+            val decision = router.route(text, routes)
+            assertTrue(text, decision is RouteDecision.Local && decision.needsConfirmation)
+        }
+    }
+
+    @Test
+    fun `everyday commands run without confirmation`() {
+        val everyday = listOf(
             "明天下午3点安排会议",
             "明天早上7点设个闹钟",
             "30分钟后提醒我开会",
             "记笔记：明天买牛奶",
-            "把亮度调到50%",
             "每天帮我总结新闻",
-            "打电话给张三",
+            "播放音乐",
+            "暂停播放",
+            "下一首",
         )
-        for (text in writes) {
+        for (text in everyday) {
             val decision = router.route(text, routes)
-            assertTrue(text, decision is RouteDecision.Local && decision.needsConfirmation)
+            assertTrue(text, decision is RouteDecision.Local && !decision.needsConfirmation)
         }
     }
 

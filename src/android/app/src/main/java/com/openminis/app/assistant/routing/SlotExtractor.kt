@@ -328,17 +328,53 @@ class SlotExtractor(
         val resolved = when {
             lower.contains("继续播放") || lower.contains("恢复播放") || lower.contains("resume") -> "resume"
             lower.contains("停止播放") || lower.contains("stop") -> "stop"
+            lower.contains("下一首") || lower.contains("next") -> "next"
+            lower.contains("上一首") || lower.contains("previous") -> "previous"
             lower.contains("状态") || lower.contains("status") -> "status"
             lower.contains("列表") || lower.contains("list") -> "list"
             else -> action
         }
         args.put("action", resolved)
+        if (resolved == "play") {
+            val query = musicQuery(text)
+            if (query.isNotBlank()) args.put("query", query)
+        }
         Regex(
             """(?:会话|session)\s*[:：]?\s*([A-Za-z0-9_.-]+)""",
             RegexOption.IGNORE_CASE,
         ).find(text)?.let {
             args.put("session", it.groupValues[1])
         }
+    }
+
+    /**
+     * The song the user asked for: everything after the "播放/放一首/想听…"
+     * verb, without the trailing "的歌 / 歌曲 / 音乐".
+     *
+     * 「播放周杰伦的稻香」→ 周杰伦；「放一首稻香」→ 稻香；「来首歌」→ 空
+     * （空查询表示随便放一首，播放端会走排行榜）。
+     */
+    private fun musicQuery(text: String): String {
+        var t = text.trim()
+        val triggers = listOf(
+            "播放一首", "播放一首儿", "播放一下", "播放", "放一首", "放一首儿", "放个", "放",
+            "来一首", "来一首儿", "来首", "来点", "想听一首", "想听", "要听一首", "要听",
+            "听一首", "听首", "听个", "听", "唱一首", "唱首", "唱",
+            "play", "put on",
+        )
+        for (trigger in triggers.sortedByDescending { it.length }) {
+            val index = t.indexOf(trigger, ignoreCase = true)
+            if (index >= 0) {
+                t = t.substring(index + trigger.length)
+                break
+            }
+        }
+        t = t.trim().trimStart(':', '：', ',', '，', '.', '。', '!', '！', '?', '？', ' ')
+        // 「放首歌」→ 「」；「放首歌周杰伦」→ 「周杰伦」
+        t = t.replace(Regex("""^一?[首歌]\s*"""), "")
+        t = t.replace(Regex("""(?:的)?(?:歌曲|音乐|曲子|歌)$"""), "")
+        t = t.trim().trimEnd('了', '吧', '呀', '啊')
+        return t.trim().take(40)
     }
 
     private fun extractContacts(text: String, action: String, args: JSONObject) {

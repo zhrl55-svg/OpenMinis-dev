@@ -1,8 +1,103 @@
 # 助理模式可配置路由与生活能力直达 — 交接文档
 
-日期：2026-11-13（夜）
-状态：主体实现完成，构建/安装成功，设备验证进行中；**尚未提交 Git**。
-下一步：先排查并修复下面两个安全/参数问题，再完成剩余设备验收。
+日期：2026-11-13（夜），2026-11-14 上午续
+状态：主体实现完成，构建/安装成功。2026-11-14 已修复天气结果不显示、
+补充语音确认、修复“提到天气就触发”的误路由；4.1 / 4.2 已定位。
+下一步：完成剩余设备验收（见 §9）。
+
+---
+
+## 0. 2026-11-14 上午新增（先读这里）
+
+### 0.1 天气结果不显示
+
+现象：`weather` 命中本地规则后，助手气泡只有 `✅ Weather`，正文没有天气信息。
+
+原因：路由改造后 `persistLocalExecution()` 只把结果写进 `tool_use` 工具块
+（胶囊，需点开），气泡正文只有标题。旧版 `AssistantFastPath.formatResult`
+本来会把结果拼进正文，改造时丢了。
+
+修复：
+
+- 新增 `assistant/execution/LocalResultFormatter.kt`：
+  - 天气 JSON → 中文一句话（温度/体感/湿度/风速/降水/天气现象）；
+  - 电量/存储/设备信息 JSON → 中文摘要；
+  - 纯文本（shell/文件/记忆）原样显示；
+  - 其他结构化 JSON 不倾倒到气泡，只留在工具块。
+- `LocalExecutionResult` 增加 `answer` 字段；`persistLocalExecution()` 用
+  `header + "\n\n" + answer` 作为助手正文。
+- 单测：`LocalResultFormatterTest`（7 个）。
+
+真机验证：`weather` → `✅ Weather` + `现在（09:00）：多云，-0.3°C（体感 -4.1°C）…`。
+
+### 0.2 语音确认（用户新需求）
+
+需求：本地写操作除确认卡外，还要语音确认；语音问是否确认，用户回答确认
+后执行并清除卡片；确认卡弹出时同时播报、同时进入聆听（不必先喊唤醒词），
+输入框/卡片要有动态效果。
+
+实现：`ui/chat/voice/LocalActionVoiceConfirmer.kt`
+
+1. 卡片一出现**立刻 TTS 播报**（短句：`要创建日程吗？请说“确认”或“取消”。`）；
+2. 播报结束 + 1.5s 尾音静默后自动开麦 5s，用户直接说「确认」即可，
+   不需要唤醒词；没听清会再问一次，仍不明白就把卡片留给手指；
+3. 「确认 / 执行 / 好的 / yes」→ 执行并清卡片；
+   「取消 / 不用 / 别 / no」→ 取消；
+   同时含确认与取消词（含 TTS 尾音「确认取消」）→ 判为歧义，不执行；
+4. 多候选（同名日程）只播报“请在屏幕上选择”，不做语音选择；
+5. TTS/ASR 任一不可用都静默退回确认卡；TTS 不可用时仍自动开麦；
+6. 执行完成后**简短播报结果**：成功「已创建日程：meeting」/「已运行命令」，
+   失败「操作失败：<首行错误>」，取消「已取消」；唤醒确认的短应答缩成「好」，
+   避免与结果播报抢话；
+7. 动态效果：
+   - 确认卡内蓝色呼吸圆点 +「正在播报确认提示… / 正在聆听：说“确认”或“取消”」；
+   - 输入框复用 `holdToTalkGlow` 流光，确认期间一直亮着；
+8. 会话错位修复：`LocalConfirmationBridge` 把待确认卡注册为全局回调；
+   语音唤醒转写出的「确认/取消」`LocalActionSpeech.isDirectAnswer()` 命中时，
+   直接落到卡片所在会话并播报「已确认/已取消」，不再发到「语音对话」会话；
+   键盘/按住说话输入短「确认/取消」也会被 `ChatViewModel.sendMessage()` 拦截。
+
+文案与回答解析在 `assistant/execution/LocalActionSpeech.kt`（纯函数，单测 9 个）。
+桥的单测：`LocalConfirmationBridgeTest`（3 个，Robolectric）。
+
+诊断轨迹新增（`assistant_fastpath.log`）：
+`confirm-wait` / `voice: ...` / `confirm-input: voice-confirm|voice-cancel|touch-confirm|touch-cancel|voice-wake-*` /
+`confirm-result`。
+
+### 0.3 “提到天气就触发规则”
+
+现象：语音里只要包含「天气」，比如「可以直接对接高德地图的天气接口」，
+就命中 weather 本地规则。
+
+修复（两层）：
+
+- 天气规则增加问句/指令模式（今天/明天…天气、天气怎么样/多少度、
+  what's the weather 等），真正的天气查询能命中模式；
+- `AssistantRouter` 增加“话题提及保护”：
+  - 只命中关键词、未命中模式，且句子长度 > 14、关键词占比 < 30% → 云端
+    （`cloud reason=topic-mention`）；
+  - 状态类能力（weather/device/media/calendar）没有自由文本槽时，出现
+    讨论词（讨论/方案/接口/规则/触发/代码/实现/优化/排查/日志/设计/开发/对接）
+    且长度 > 8 → 云端；
+  - 带已抽取自由文本槽的能力不适用（如「找笔记 Project Alpha」）。
+- `SEED_VERSION` 3 → 4；迁移只把新 patterns 合并进已有 `life.weather`，
+  不覆盖用户自定义关键词。
+
+真机验证：`we can use the weather api in the design` → `cloud reason=topic-mention`。
+
+### 0.4 4.1 / 4.2 结论
+
+- **4.1 创建日程绕过确认：未复现。** 用完全准确的
+  `schedule a meeting tomorrow at 6pm` 在真机发送，确认卡正常弹出
+  （截图见 `LocalActionConfirmDialog`，取消/执行都在）。
+  此前日志中该句 2 秒后执行，最可能是人已点「执行」；没有本地确认的
+  情况是**输入被 adb/调试输入丢字导致规则未命中，走了云端 Agent**
+  （`schdul a meeting…` 实测复现，云端按 Agent 模式直接执行，属既有行为）。
+- **4.2 `metting`：输入丢字，不是抽取器 bug。** `delete event meeting`
+  正确输入时卡片正常弹出、抽取结果正确；日志里实际收到的是
+  `delete event meetng`。`adb shell input text` 与 `debug.inputText`
+  在本机都会偶发丢字符/空格，测试时必须先 dump 输入框核对原文。
+
 
 ---
 
@@ -285,3 +380,155 @@ src/android/app/src/test/java/com/openminis/app/assistant/
 - 工作区还有若干与本次任务无关的既有未跟踪文件（`models/`、`.tmp_*`、旧 patch、截图等），**不要清理**。
 - 暂无 Git 提交。
 
+
+---
+
+## 9. 2026-11-14 上午状态与剩余验收
+
+当前 APK：`src/android/app/build/outputs/apk/github/perf/app-github-perf.apk`
+（2026-11-14 09:2x 构建，已覆盖安装到 ELS-AN00 `192.168.2.32:5555`）。
+
+已完成的真机验证：
+
+- `weather` → 本地执行，气泡显示完整天气摘要（不再是单词 Weather）。
+- `schedule a meeting tomorrow at 6pm` / `delete event meeting` →
+  确认卡正常弹出。
+- 语音确认：卡片出现后 `tts-ready=true` 立即播报，播报结束自动开麦；
+  说「确认」后执行并清卡片，随后播报「已创建日程：meeting」
+  （轨迹 `confirm-wait` → `tts-ready` → `voice: listen` → `voice: heard 确认`
+  → `handled` → `voice: announce`）。卡片显示
+  「正在播报 / 正在聆听」呼吸提示，输入框流光同步点亮。
+- 唤醒路径：待确认卡注册到 `LocalConfirmationBridge`；唤醒转写结果先问桥，
+  命中「确认/取消」就落回卡片所在会话（单测覆盖，真机待用户复测）。
+- 助理关闭（`minis://action/assistant_mode?on=false`）→ 轨迹 `skip: disabled`，
+  `weather` 走云端，无本地 tool_use、无确认卡；之后已恢复开启。
+- `we can use the weather api in the design` → `cloud reason=topic-mention`。
+- 测试日程（id 251/252/253/254/255）已全部清理。
+
+尚未完成 / 建议下一轮：
+
+1. 规则页：导入/导出/恢复默认/诊断入口（上次滚动误触编辑弹窗）。
+   恢复默认会覆盖用户规则，先导出备份。
+2. `minis-config` 写操作：`add` / `set` / `remove` 会触发应用内确认，
+   建议用户在场时做；`get` 已验证可用。
+3. 语音确认的 TTS 可听性：真机日志显示 `tts ready` 仍待确认；
+   若仍听不到播报，先测 `android-speak speak "测试"`，再查华为
+   `com.huawei.hiai` 引擎音量/语音数据。
+4. 多候选删除的语音路径：只播报“请在屏幕上选择”，未做语音选条。
+5. 端侧天气失败（定位权限/网络）仍按“读失败转云端”处理，未在本地弹错。
+
+测试注意（2026-11-14 实测）：
+
+- `adb shell input text` 和 `debug.inputText` 在本机都会偶发丢字符/空格；
+  发送前必须用 uiautomator dump 核对输入框原文。
+- `minis://action/new_chat` 在聊天页已打开时可能只投递到当前实例、
+  不真正新建会话；测试写操作会混进用户当前会话。
+- 日历测试数据可用 `debug.shellExecute` 跑
+  `android-calendar list/delete` 清理（见 §6 的 RPC 端口转发）。
+
+## 10. 2026-11-14 下午：音乐播放器（新功能）
+
+当前 APK：`src/android/app/build/outputs/apk/github/perf/app-github-perf.apk`
+（2026-11-14 12:4x 构建，已覆盖安装到 ELS-AN00 `192.168.2.32:5555`）。
+
+### 10.1 需求
+
+用户要求重做 app 里的音乐播放：「简单漂亮」，播放时自动出现在聊天页顶端，
+音源仍是 buntu 上自建的 NetEase API，逻辑参考 pilot（`D:\phone agent`）。
+后续补充：取消封面图；样式参考 pilot；播放条底色白色 90% 透明；
+设置里加扫码登录；确认卡只对破坏性操作弹出。
+
+### 10.2 实现
+
+> 2026-11-14 下午第二轮：按用户要求**整体移植 pilot 的播放器**——
+> 引擎生命周期、推荐/队列下拉、紧凑播放条样式全部对齐（不再有全屏 sheet）。
+
+新增（全部在 `com.openminis.app.media.music` / `ui.media.music`）：
+
+- `MusicPreferences.kt` — 音源地址 + cookie 存本地。
+  默认 LAN `http://192.168.2.102:3001`，备用 tailnet `http://100.95.180.77:3001`。
+- `NeteaseMusicApi.kt` — `/search`、`/top/song`、`/song/url`（不要用
+  `/song/url/v1`，会触发 -460）、`/lyric`、扫码登录三件套
+  （`/login/qr/key` → `/login/qr/create` → `/login/qr/check`）、`/login/status`。
+  请求经 `NetworkHttp.client("music", …)` 走 app 内嵌 Tailscale 路由：
+  在家走 LAN，不在家走 tailnet，两个地址都实测可用。
+- `MusicPlayerController.kt` — **移植 pilot 的播放逻辑**：一首歌一个
+  ExoPlayer，放完/出错/停止立即 `release()`（空载零占用）；队列、顺序/
+  列表循环/单曲循环、随机+历史回退、连续失败自动跳过；播放地址每首现取
+  （URL ~20 分钟过期），歌词同时解析。`playQuery()` 的命令分词和 pilot
+  一致：最近 / 每日推荐 / 我喜欢 / 新歌 / 飙升 / 热门 → 对应列表，其余
+  走搜索（含「周杰伦的稻香」= 稻香 by 周杰伦 的匹配打分）。
+- `MusicHistoryStore.kt` — 本地最近播放 30 首（网易云 `/user/record` 为空
+  时兜底），移植自 pilot。
+- `NeteaseMusicApi` 新增 `/user/record`、`/playlist/detail`（榜单 id：
+  3778678 热歌 / 3779629 新歌 / 19723756 飙升）、`/recommend/songs`、
+  `/likelist` + `/song/detail`、`loginProfile`（uid）。
+- `ui/media/music/MusicPlayerUi.kt` — **pilot 的紧凑播放条 1:1 移植**：
+  第一行 音阶 + 曲名·歌手 + 「推荐 ▾」（最近播放/热歌榜/每日推荐/我喜欢的/
+  新歌榜/飙升榜）+ ×；第二行 同步歌词 + 时间；2dp 进度；第三行
+  随机 / 上一首 / 播放 / 下一首 / 模式胶囊 + 「候选 N/M ▾」（队列下拉，
+  点条目直接切歌）。样式用 pilot 的渐变卡（primary 28% → surfaceVariant →
+  surface）。
+- `ui/media/music/MusicSettingsSheet.kt` — 设置 › 音乐：扫码登录 + 音源地址。
+
+接入：
+
+- `ChatScreen`：播放条以 `AnimatedVisibility` 悬浮在消息列表上方
+  （`zIndex(2f)`）—— 放 topBar 里时后面没有内容，透明效果看不出来；
+  悬浮后消息从下面滚过才有层次感。全屏 sheet 与菜单里的「音乐」入口已移除，
+  交互回到 pilot 的「播放条 + 下拉」。
+- `LocalCapabilityRegistry` / `DefaultAssistantRoutes` / `SlotExtractor`：
+  `media.play` 增加可选 `query` 槽；新增 `life.music-play` / `next` / `previous`
+  路由（锚定句式，排除「设计/接口/逻辑/播放器」等讨论词）；
+  播放/暂停/下一首等媒体控制 `confirm = NEVER`。
+- `LocalCapabilityExecutor`：`media` 优先驱动内置播放器，找不到再退回
+  原来的 `MediaPlayerManager` 会话。工具胶囊显示真正解析出的歌名
+  （「放一首周杰伦的稻香」→ `Play music: 稻香`）。
+
+### 10.3 已解决的坑
+
+- **所有请求返回 null**：`client.newCall().execute().use { … return@use json }`
+  的 `use` 值被丢弃，整段 `withContext` 返回 null。改成 `return@withContext json`。
+- **扫码二维码不显示**：data URI 交给 Coil 渲染不出来。改为
+  `Base64.decode` + `BitmapFactory` 直接生成 ImageBitmap（`decodeQrBitmap`）。
+- **`放一首周杰伦的稻香` 搜成整句**：控制器先搜整句，再搜「的」后的歌名，
+  按标题/歌手匹配打分；原唱周杰伦在网易云已下架，搜到的是翻唱
+  （如「稻香(治愈版)」），这是曲库现状，不是解析 bug。
+- **播放条透明看不出来**：见上，浮动在消息列表上方。
+- **焦点回不到输入框**：真机复测当前构建，播放中点输入框键盘正常弹出并
+  可输入（`mInputShown=true`）；播放条已移出 topBar，不再挤占布局。
+
+### 10.4 确认策略变更（用户要求）
+
+只有破坏性操作才弹确认卡：
+
+- `AssistantRouter`：`ConfirmMode.WRITE` → 仅 `CapabilityRisk.HIGH`；
+  `ALWAYS` 强制、`NEVER` 永不确认。
+- 时间歧义不再弹卡（「记笔记：明天买牛奶」里的「明天」不是时间）。
+- `file_write` / `file_edit` 风险提升为 HIGH（会覆盖文件）。
+- 测试改为 `destructive actions require confirmation` /
+  `everyday commands run without confirmation`，全部通过；
+  真机 `暂停播放` → `handled locally: media/pause success=true`，无卡片。
+
+### 10.4.1 确认卡自动退出（用户要求）
+
+- 卡片带倒计时（右下角「N 秒后自动取消」），到时自动收起并回一句
+  「本地操作等待确认超时，已取消」；语音确认的麦克风同时停止。
+- 超时 15 秒（`ChatViewModel.LOCAL_CONFIRM_TIMEOUT_MS`；用户反馈 30 秒太长）。
+- 倒计时属于卡片本身（`LocalActionConfirmation.timeoutSeconds`），
+  换卡会重置。
+
+### 10.5 单测
+
+- `NeteaseMusicApiTest`：两种歌曲 JSON 形状、歌词解析（作词/作曲行过滤）。
+- `AssistantRouteCorpusTest`：新增音乐路由样例与「音乐播放逻辑」等
+  反例；确认策略用例。
+- 全量：`:app:testGithubDebugUnitTest --tests 'com.openminis.app.assistant.*'
+  --tests 'com.openminis.app.media.*'` 108 个用例通过。
+
+### 10.6 待用户确认/后续
+
+1. 起床/离家场景切到 tailnet 时音源是否顺畅（代码已走路由，实测
+   `debug.net.httpGet` tailnet 200）。
+2. 原唱版权：周杰伦等歌手在网易云无版权，只能放翻唱；如需原唱要换音源。
+3. 播放器没有后台常驻/通知栏控制（进程被系统回收时停止）。

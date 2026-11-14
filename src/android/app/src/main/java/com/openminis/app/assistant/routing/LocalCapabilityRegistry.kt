@@ -30,8 +30,11 @@ object LocalCapabilityRegistry {
         LocalCapability(
             "file_write", "Write file",
             mapOf(
+                // [T-assistant-confirm-destructive-only] Writing a file can
+                // overwrite what is there: that is destructive, so it keeps
+                // asking.
                 "write" to action(
-                    "write", false, CapabilityRisk.MEDIUM,
+                    "write", false, CapabilityRisk.HIGH,
                     slot("path", SlotType.PATH), slot("content", SlotType.TEXT),
                 ),
             ),
@@ -41,7 +44,7 @@ object LocalCapabilityRegistry {
             "file_edit", "Edit file",
             mapOf(
                 "edit" to action(
-                    "edit", false, CapabilityRisk.MEDIUM,
+                    "edit", false, CapabilityRisk.HIGH,
                     slot("path", SlotType.PATH),
                     slot("old_string", SlotType.TEXT),
                     slot("new_string", SlotType.TEXT),
@@ -189,9 +192,17 @@ object LocalCapabilityRegistry {
         LocalCapability(
             "media", "Media control",
             mapOf(
-                "play" to action("play", false),
+                // [T-music-player-top] `play` drives the in-app music player
+                // (NetEase catalogue on the buntu host). The query is
+                // optional: a blank query plays the public chart.
+                "play" to action(
+                    "play", false,
+                    slots = arrayOf(slot("query", SlotType.QUERY, required = false)),
+                ),
                 "pause" to action("pause", false),
                 "resume" to action("resume", false),
+                "next" to action("next", false),
+                "previous" to action("previous", false),
                 "stop" to action("stop", false),
                 "status" to action("status", true),
                 "list" to action("list", true),

@@ -71,6 +71,15 @@ class WakeWordService : Service() {
         /** Guard against a second hit right after the conversation ended. */
         private const val WAKE_SUPPRESS_MS = 2_000L
 
+        /**
+         * How long keyword spotting stays off after a rejected wake.
+         *
+         * The engine and microphone stay open — only the spotter pauses.
+         * Without the pause the tail of the same ambient phrase can match
+         * again immediately, which burns a voiceprint extraction per repeat.
+         */
+        private const val WAKE_REJECT_COOLDOWN_MS = 700L
+
         /** Segments kept while the previous one is being transcribed. */
         private const val MAX_PENDING_UTTERANCES = 2
 
@@ -94,7 +103,7 @@ class WakeWordService : Service() {
 
         /**
          * How much of the recording around the wake word is used to enrol
-         * the owner.
+         * or verify the owner.
          *
          * The keyword spotter fires at the *end* of the keyword, so the last
          * two and a half seconds contain the whole keyword plus a little of
@@ -271,6 +280,15 @@ class WakeWordService : Service() {
         /** Only the wake word is being watched for. */
         IDLE,
 
+        /**
+         * The wake word matched, but its voiceprint is still being checked.
+         *
+         * Not a wake yet: no acknowledgement, no VAD, no listening window.
+         * The microphone stays open only to keep the engine from being torn
+         * down between the keyword and the verdict.
+         */
+        VERIFYING,
+
         /** The microphone is open and the user's request is being recorded. */
         LISTENING,
 
@@ -374,6 +392,7 @@ class WakeWordService : Service() {
         // second of that is a second in which the user is already talking
         // into a microphone that answers with silence.
         prewarmTts()
+        prewarmVoiceprint()
         gateJob = scope.launch { gateLoop() }
     }
 
@@ -625,7 +644,7 @@ class WakeWordService : Service() {
 
     private fun onWakeHit(word: String) {
         val now = SystemClock.elapsedRealtime()
-        if (now < wakingUntil || destroying) return
+        if (now < wakingUntil || destroying || conversationState != ConversationState.IDLE) return
         wakingUntil = now + WAKE_SUPPRESS_MS
         // Log what the gate believed at the moment of the hit. A hit with
         // ttsSpeaking=true means the listener heard the assistant's own
@@ -642,45 +661,149 @@ class WakeWordService : Service() {
                 "stt=$stt fg=$foreground",
         )
         VoiceWakeState.trace(this, "WAKE_HIT $word")
-        publish(VoiceWakePhase.WAKING, "唤醒词「$word」")
 
         // The microphone STAYS OPEN: the request is the next thing the user
         // says, and the voiceprint needs the exact samples. Only the keyword
         // spotter goes quiet, so it cannot fire again inside the utterance.
         engine?.setDetecting(false)
-        enrollFromWakeWord()
-        startConversation()
+
+        if (!WakeWordSettings.voiceprintEnabled.value) {
+            publish(VoiceWakePhase.WAKING, "唤醒词「$word」")
+            startConversation()
+            return
+        }
+
+        // Take the snapshot on the caller's thread, before the model has
+        // had time to run: the ring buffer keeps moving and must not pick
+        // up the acknowledgement or the request.
+        val snapshot = engine?.recentAudio(WAKE_ENROLL_WINDOW_MS) ?: ShortArray(0)
+
+        // Nothing to compare against yet. Enrol in the background and let
+        // the first wake through immediately: waiting for a 28 MB model to
+        // load before saying "我在" would make the very first use feel
+        // broken, and there is no verdict to wait for anyway.
+        if (!voiceprint.hasTemplate()) {
+            publish(VoiceWakePhase.WAKING, "唤醒词「$word」")
+            enrollWakeVoiceprint(snapshot)
+            startConversation()
+            return
+        }
+
+        // A hit is not a wake until the owner's voiceprint passes. Park in
+        // VERIFYING: the gate loop keeps the microphone open, but no
+        // acknowledgement is spoken, no VAD is armed and no listening
+        // window starts. An ambient "小派" therefore never becomes a wake.
+        conversationState = ConversationState.VERIFYING
+        conversationDeadline = now + CONVERSATION_WINDOW_MS
+        // Do not publish WAKING here: on a false hit the overlay and
+        // notification must stay on "waiting", exactly as if the phrase
+        // had never matched. The score line is the diagnostic signal.
+
+        scope.launch {
+            val passed = withContext(Dispatchers.IO) {
+                passesWakeVoiceprint(snapshot)
+            }
+            if (destroying || conversationState != ConversationState.VERIFYING) return@launch
+
+            if (passed) {
+                // Verdict passed: this is a real wake. Begin the
+                // conversation exactly as before.
+                conversationState = ConversationState.IDLE
+                startConversation()
+                return@launch
+            }
+
+            // Rejected: go straight back to standby. No acknowledgement,
+            // no VAD, no conversation window — the false hit is discarded.
+            conversationState = ConversationState.IDLE
+            wakeRejected(snapshot)
+        }
+    }
+
+    /**
+     * A failed wake: discard it without saying or recording anything.
+     *
+     * The spotter pauses briefly so the tail of the same ambient phrase
+     * cannot immediately trigger another extraction.
+     */
+    private suspend fun wakeRejected(snapshot: ShortArray) {
+        pendingUtterances.clear()
+        // The gate loop stops the engine while [wakingUntil] is in the
+        // future and the conversation is idle. Clearing it keeps the
+        // microphone (and the KWS model) alive; only [WakeWordEngine.detecting]
+        // is paused below.
+        wakingUntil = 0L
+        publish(VoiceWakePhase.WAITING, "等待唤醒词「${WakeWordSettings.wakeWord.value}」")
+        AppLogger.info(TAG, "唤醒声纹未通过，保持待命（${snapshot.size * 1000 / WakeAudioCapture.SAMPLE_RATE}ms）")
+        delay(WAKE_REJECT_COOLDOWN_MS)
+        if (!destroying && conversationState == ConversationState.IDLE) {
+            engine?.setDetecting(true)
+        }
     }
 
     // ------------------------------------------------------- conversation
 
-    /**
-     * Register the owner from the wake word itself.
-     *
-     * The wake word is the one sample that is guaranteed to be the owner's
-     * own voice, and it was recorded before the assistant said a single
-     * word — no echo in it. Pilot enrolls from the very same place.
-     *
-     * Enrolling from the first *request* instead is what broke the feature:
-     * that segment can still carry the echo of "我在", and a template made
-     * out of the assistant's own voice rejects every real request from then
-     * on — the assistant answers once and then goes silent.
-     */
-    private fun enrollFromWakeWord() {
-        if (!WakeWordSettings.voiceprintEnabled.value) return
-        val gate = voiceprint
-        if (gate.hasTemplate()) return
-        val snapshot = engine?.recentAudio(WAKE_ENROLL_WINDOW_MS) ?: return
-        val seconds = snapshot.size.toDouble() / WakeAudioCapture.SAMPLE_RATE
+    /** Enrol the first wake-word sample without delaying the first reply. */
+    private fun enrollWakeVoiceprint(pcm: ShortArray) {
+        val seconds = pcm.size.toDouble() / WakeAudioCapture.SAMPLE_RATE
         if (seconds < WAKE_ENROLL_MIN_SECONDS) {
             AppLogger.info(TAG, "唤醒词音频 ${"%.1f".format(seconds)}s 太短，稍后用第一句注册")
             return
         }
         scope.launch(Dispatchers.IO) {
-            val ok = gate.enroll(snapshot)
+            val ok = voiceprint.enroll(pcm)
             AppLogger.info(TAG, "用唤醒词注册声纹 ${"%.1f".format(seconds)}s → saved=$ok")
             VoiceWakeState.trace(this@WakeWordService, "声纹注册 ${if (ok) "成功" else "失败"}")
         }
+    }
+
+    /**
+     * The wake-word voiceprint gate.
+     *
+     * The wake word is public: the KWS model fires on the sound of the
+     * phrase, not on who said it. Without this check an ambient "小派" from
+     * a TV or another person opens a conversation, plays "我在", and holds
+     * the microphone for eight seconds.
+     *
+     * Soft-gate rules are the same as [passesVoiceprint]: no template, no
+     * model, or an unusably short sample lets the hit through rather than
+     * locking the owner out. With a template and a usable sample, the score
+     * must reach the configured threshold.
+     *
+     * On the very first wake there is no template; that wake-word sample is
+     * enrolled, exactly as before — it is still the one sample guaranteed
+     * not to contain the assistant's own voice.
+     */
+    private fun passesWakeVoiceprint(pcm: ShortArray): Boolean {
+        if (!WakeWordSettings.voiceprintEnabled.value) return true
+        val gate = voiceprint
+        val seconds = pcm.size.toDouble() / WakeAudioCapture.SAMPLE_RATE
+
+        if (!gate.hasTemplate()) return true
+
+        if (seconds < WAKE_ENROLL_MIN_SECONDS) {
+            AppLogger.info(TAG, "唤醒声纹跳过：音频仅 ${"%.1f".format(seconds)}s，放行")
+            return true
+        }
+
+        val score = gate.verify(pcm)
+        if (score == null) {
+            AppLogger.info(TAG, "唤醒声纹无法校验，放行")
+            return true
+        }
+        val threshold = WakeWordSettings.voiceprintThreshold.value
+        val ok = score >= threshold
+        AppLogger.info(
+            TAG,
+            "唤醒声纹 ${"%.3f".format(score)} 阈值 ${"%.2f".format(threshold)} → " +
+                (if (ok) "通过" else "拒绝"),
+        )
+        VoiceWakeState.trace(
+            this,
+            "唤醒声纹 ${"%.3f".format(score)} 阈值 ${"%.2f".format(threshold)} " +
+                (if (ok) "通过" else "拒绝"),
+        )
+        return ok
     }
 
     /**
@@ -728,6 +851,23 @@ class WakeWordService : Service() {
             tts = speaker
             val ready = withContext(Dispatchers.IO) { speaker.awaitReady() }
             AppLogger.info(TAG, "TTS 预热完成 ready=$ready")
+        }
+    }
+
+    /**
+     * Load the 28 MB speaker model while waiting for a wake word.
+     *
+     * Wake-time verification sits between the keyword and "我在"; loading
+     * the model on that path would add seconds to the first wake after
+     * every service start. Only prewarm when a template exists — otherwise
+     * the first wake is enrolling, not verifying.
+     */
+    private fun prewarmVoiceprint() {
+        if (!WakeWordSettings.voiceprintEnabled.value) return
+        if (!voiceprint.hasTemplate()) return
+        scope.launch(Dispatchers.IO) {
+            val ready = voiceprint.ensureReady()
+            AppLogger.info(TAG, "声纹模型预热完成 ready=$ready")
         }
     }
 
@@ -1048,6 +1188,36 @@ class WakeWordService : Service() {
         }
         AppLogger.info(TAG, "识别结果：$text")
         VoiceWakeState.trace(this, "识别：$text")
+
+        // 如果当前有一张本地写操作确认卡，这句话可能是「确认/取消」。
+        // 必须先问桥：否则唤醒链路会把它当成新消息发到语音会话，卡片仍挂着。
+        val bridgeResolution = com.openminis.app.assistant.execution.LocalConfirmationBridge
+            .resolve(text)
+        if (bridgeResolution != null) {
+            // 结果播报由卡片所在会话负责（「已创建日程…」「已取消」）。
+            // 这里只给一声很短的应答，避免两个 TTS 实例同时说话。
+            val phrase = when (bridgeResolution) {
+                com.openminis.app.assistant.execution.LocalConfirmationBridge.Resolution.CONFIRM ->
+                    "好"
+                com.openminis.app.assistant.execution.LocalConfirmationBridge.Resolution.CANCEL ->
+                    null
+            }
+            AppLogger.info(TAG, "确认卡由唤醒语音处理：$bridgeResolution")
+            VoiceWakeState.trace(this, "确认卡：$bridgeResolution")
+            publish(VoiceWakePhase.REPLYING, if (phrase != null) "已确认" else "已取消")
+            if (phrase != null) {
+                val speaker = tts ?: com.openminis.app.speech.TextToSpeechManager().also {
+                    it.init(applicationContext)
+                    tts = it
+                }
+                WakeConversation.speakQuietly(speaker, phrase)
+            }
+            if (conversationState == ConversationState.REPLYING) {
+                delay(ECHO_GUARD_MS)
+                resumeListening()
+            }
+            return
+        }
 
         val sessionId = runCatching { WakeConversation.ensureSession(this) }.getOrNull()
         if (sessionId == null) {

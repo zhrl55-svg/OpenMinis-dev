@@ -366,6 +366,14 @@ data class LocalActionConfirmation(
     val action: String,
     val destructive: Boolean,
     val choices: List<LocalActionChoice> = emptyList(),
+    /**
+     * [T-confirm-card-auto-dismiss] 卡片不回答也会自己关掉。
+     *
+     * 一个等不到回应的确认卡会一直压在聊天上方：用户走开、改主意、或者
+     * 语音没听清时，它既挡消息又让助理一直停在等待状态。倒计时结束即
+     * 取消，并回一句「超时已取消」。
+     */
+    val timeoutSeconds: Int = 15,
 )
 
 /** One selectable result when a local write matches more than one record. */

@@ -17,6 +17,11 @@ import kotlin.math.sqrt
  assistant answer only its owner, and it also blocks the assistant's own
  TTS echo (a machine voice is a long way from the owner's embedding).
 
+ The gate runs twice: once on the wake word itself, before the assistant
+ says or records anything, and once on every request after it. The
+ wake-time check is what keeps a TV or a passer-by from opening a silent
+ eight-second conversation every time the KWS model hears the phrase.
+
  ## What it is NOT
 
  This is a **soft gate that lowers false triggers, not authentication**.
@@ -256,7 +261,8 @@ class WakeVoiceprintGate(private val context: Context) {
          * pilot measured on a real device: TTS echo 0.02–0.11, the owner
          0.39–0.52. 0.30 sits in between, biased towards the owner — better
          to let a stranger wake it once (they still cannot give a command
-         that passes the gate) than to lock the owner out.
+         that passes the gate) than to lock the owner out. The same value
+         gates the wake word itself and the request that follows it.
          */
         const val WAKE_THRESHOLD = 0.30f
     }

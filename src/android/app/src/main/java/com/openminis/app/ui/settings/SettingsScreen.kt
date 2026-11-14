@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.FolderShared
 import androidx.compose.material.icons.outlined.FrontHand
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Inventory2
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
@@ -138,6 +139,9 @@ fun SettingsScreen(
     var localAssistantMode by remember {
         mutableStateOf(com.openminis.app.llm.mnn.LocalAssistantPrefs.isEnabled(context))
     }
+    // [T-music-player-top] The music settings sheet (NetEase login + proxy
+    // address) is hosted here so it does not need a navigation route.
+    var showMusicSheet by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
@@ -287,6 +291,21 @@ fun SettingsScreen(
                     title = stringResource(R.string.settings_assistant_routes),
                     subtitle = stringResource(R.string.settings_assistant_routes_subtitle),
                     onClick = onAssistantRoutesClick,
+                    showDivider = false,
+                )
+            }
+
+            // -- Music --
+            // [T-music-player-top] The in-app player streams from the NetEase
+            // proxy on the buntu host. Scanning the QR code logs the phone
+            // in - without it most well-known songs have no stream URL.
+            SettingsSection(title = stringResource(R.string.settings_section_music)) {
+                SettingsItem(
+                    icon = Icons.Outlined.MusicNote,
+                    iconColor = Color(0xFFE0342E),
+                    title = stringResource(R.string.settings_music),
+                    subtitle = stringResource(R.string.settings_music_subtitle),
+                    onClick = { showMusicSheet = true },
                     showDivider = false,
                 )
             }
@@ -447,6 +466,13 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    // [T-music-player-top] NetEase login + proxy address.
+    if (showMusicSheet) {
+        com.openminis.app.ui.media.music.MusicSettingsSheet(
+            onDismiss = { showMusicSheet = false },
+        )
     }
 
     if (showFeedbackSheet) {

@@ -46,6 +46,11 @@ data class LocalExecutionResult(
     val success: Boolean,
     val toolName: String,
     val title: String,
+    /**
+     * 助手气泡里显示的正文。空串表示只显示标题。
+     * 由 [LocalResultFormatter] 生成：JSON 结果翻成一句话，纯文本原样显示。
+     */
+    val answer: String = "",
 )
 
 /**
@@ -139,7 +144,7 @@ class LocalCapabilityExecutor(private val context: Context) {
                 "scheduled_task" -> scheduledTask(decision.action, args, sessionId)
                 "weather" -> weather(decision.action, args, sessionId)
                 "device" -> device(decision.action, args)
-                "media" -> media(decision.action, args)
+                "media" -> media(decision.action, args, decision.route.label)
                 "contacts" -> contacts(decision.action, args)
                 "app_launch" -> appLaunch(decision.action, args)
                 else -> NativeOffloadResult(2, "Unsupported local capability: ${decision.capability}")
@@ -148,11 +153,18 @@ class LocalCapabilityExecutor(private val context: Context) {
             AppLogger.warning(TAG, "${decision.capability}/${decision.action} failed: ${t.message}")
             NativeOffloadResult(1, "本地执行失败：${t.message ?: t.javaClass.simpleName}")
         }
+        val success = result.exitCode == 0
         LocalExecutionResult(
             output = result.output.trim(),
-            success = result.exitCode == 0,
+            success = success,
             toolName = decision.capability,
             title = decision.args.optString("tool_title").ifBlank { decision.route.label },
+            answer = LocalResultFormatter.answer(
+                capability = decision.capability,
+                action = decision.action,
+                output = result.output,
+                success = success,
+            ),
         )
     }
 
@@ -654,9 +666,20 @@ class LocalCapabilityExecutor(private val context: Context) {
         )
     }
 
-    private fun media(action: String, args: JSONObject): NativeOffloadResult {
-        val handler = PlayerOffloadHandler()
+    private suspend fun media(
+        action: String,
+        args: JSONObject,
+        label: String,
+    ): NativeOffloadResult {
         val requested = args.optString("action", action)
+        // [T-music-player-top] The in-app music player owns the common
+        // cases: it is what the user sees at the top of the chat, so the
+        // assistant drives the same thing. The generic file-playback
+        // sessions stay the fallback for what the player does not know.
+        val musicResult = withContext(Dispatchers.Main) { musicControl(requested, args, label) }
+        if (musicResult != null) return musicResult
+
+        val handler = PlayerOffloadHandler()
         if (requested == "list") {
             return offload("android-player", handler, listOf("android-player", "list"))
         }
@@ -675,6 +698,101 @@ class LocalCapabilityExecutor(private val context: Context) {
             handler,
             listOf("android-player", requested, session),
         )
+    }
+
+    /**
+     * Drive the music player. Returns null when the request is not one the
+     * music player can serve, so the caller can fall back to the generic
+     * playback sessions.
+     */
+    private suspend fun musicControl(
+        action: String,
+        args: JSONObject,
+        label: String,
+    ): NativeOffloadResult? {
+        val music = com.openminis.app.media.music.MusicPlayerController.get(context)
+        return when (action) {
+            "play" -> {
+                val query = args.optString("query").trim()
+                val track = music.playQuery(query)
+                if (track == null) {
+                    NativeOffloadResult(
+                        1,
+                        if (query.isBlank()) {
+                            "没有找到可播放的歌曲。"
+                        } else {
+                            "没有找到「$query」或该歌曲暂时无法播放。"
+                        },
+                    )
+                } else {
+                    val artist = track.artist.takeIf { it.isNotBlank() }
+                    // The tool pill shows the song that is really playing -
+                    // 「放一首周杰伦的稻香」 resolves to 稻香, not to the
+                    // phrase the user typed.
+                    args.put("tool_title", "$label: ${track.title}")
+                    NativeOffloadResult(
+                        0,
+                        if (artist != null) {
+                            "已播放：${track.title} — $artist"
+                        } else {
+                            "已播放：${track.title}"
+                        },
+                    )
+                }
+            }
+            "pause" -> if (music.state.value.hasTrack) {
+                music.pause()
+                NativeOffloadResult(0, "已暂停播放。")
+            } else {
+                null
+            }
+            "resume" -> if (music.state.value.hasTrack) {
+                music.resume()
+                NativeOffloadResult(0, "已继续播放。")
+            } else {
+                null
+            }
+            "next" -> if (music.state.value.hasTrack) {
+                music.next()
+                NativeOffloadResult(0, "已切到下一首。")
+            } else {
+                null
+            }
+            "previous" -> if (music.state.value.hasTrack) {
+                music.previous()
+                NativeOffloadResult(0, "已回到上一首。")
+            } else {
+                null
+            }
+            "stop" -> if (music.state.value.hasTrack) {
+                music.stop()
+                NativeOffloadResult(0, "已停止播放。")
+            } else {
+                null
+            }
+            "status" -> if (music.state.value.hasTrack) {
+                val state = music.state.value
+                val position = state.positionMs / 1000
+                val duration = state.durationMs / 1000
+                NativeOffloadResult(
+                    0,
+                    "正在播放：${state.track?.title.orEmpty()}（$position/$duration 秒）" +
+                        (if (state.isPlaying) "，播放中" else "，已暂停"),
+                )
+            } else {
+                null
+            }
+            "list" -> if (music.state.value.queue.isNotEmpty()) {
+                val lines = music.state.value.queue.mapIndexed { index, track ->
+                    val artist = track.artist.takeIf { it.isNotBlank() }
+                    "${index + 1}. ${track.title}${artist?.let { " — $it" }.orEmpty()}"
+                }
+                NativeOffloadResult(0, lines.joinToString("\n"))
+            } else {
+                null
+            }
+            else -> null
+        }
     }
 
     private fun contacts(action: String, args: JSONObject): NativeOffloadResult {

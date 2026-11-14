@@ -1,7 +1,7 @@
 package com.openminis.app.assistant.routing
 
 object DefaultAssistantRoutes {
-    const val SEED_VERSION = 3
+    const val SEED_VERSION = 5
 
     private val RETIRED_AT_V3 = setOf("life.media")
 
@@ -237,6 +237,15 @@ object DefaultAssistantRoutes {
         r(
             "life.weather", "Weather", "life", "weather", "current", 160,
             listOf("天气", "下雨", "温度", "气温", "weather", "forecast"),
+            // 只出现「天气」两个字不等于是问天气。真正的问句/指令会命中
+            // 下面这些模式；单纯提到天气的长句子由 AssistantRouter 的
+            // 话题提及保护挡回云端（例如「可以直接对接高德地图的天气接口」）。
+            patterns = listOf(
+                """(?:今天|明天|后天|现在|这几天|周末).{0,6}(?:天气|下雨|温度|气温)""",
+                """(?:天气|下雨|温度|气温).{0,8}(?:怎么样|如何|多少度|多少|带伞|穿什么)""",
+                """\b(?:what'?s|whats|how'?s|hows)\b.{0,16}\bweather\b""",
+                """\bweather\b.{0,16}\b(?:today|tomorrow|now|this week)\b""",
+            ),
             examples = listOf("今天天气怎么样", "what's the weather"),
         ),
         r(
@@ -254,14 +263,19 @@ object DefaultAssistantRoutes {
         r(
             "life.media-pause", "Pause media", "life", "media", "pause", 145,
             listOf("暂停播放", "暂停音乐", "pause music", "pause playback"),
+            // [T-music-player-top] Pausing is a transient state change, not
+            // a data write: it must not raise a confirmation card.
+            confirm = ConfirmMode.NEVER,
         ),
         r(
             "life.media-resume", "Resume media", "life", "media", "resume", 145,
             listOf("继续播放", "恢复播放", "resume music", "resume playback"),
+            confirm = ConfirmMode.NEVER,
         ),
         r(
             "life.media-stop", "Stop media", "life", "media", "stop", 145,
             listOf("停止播放", "关闭音乐", "stop music", "stop playback"),
+            confirm = ConfirmMode.NEVER,
         ),
         r(
             "life.media-status", "Media status", "life", "media", "status", 140,
@@ -270,6 +284,43 @@ object DefaultAssistantRoutes {
         r(
             "life.media-list", "List media sessions", "life", "media", "list", 135,
             listOf("播放列表", "媒体会话", "media sessions", "list playback"),
+        ),
+        // [T-music-player-top] The in-app music player: 「放一首周杰伦的稻香」
+        // searches the NetEase catalogue on the buntu host and starts
+        // playing; the mini player slides in at the top of the chat.
+        r(
+            "life.music-play", "Play music", "life", "media", "play", 150,
+            listOf(
+                "播放音乐", "放首歌", "放一首", "放首歌儿", "来首歌", "来一首",
+                "听首歌", "听一首", "唱一首", "放点歌", "play music", "play a song",
+            ),
+            // The patterns are anchored: a command is a short sentence that
+            // STARTS with the verb. Without the anchor 「音乐播放逻辑」 would
+            // look like a request to play a song called 逻辑.
+            patterns = listOf(
+                """^(?:帮我|给我|请|帮忙|麻烦|能不能|可以|我想|我要|想|要)?\s*(?:播放|放|来|想听|要听|听|唱)\s*一?[首下]\s*[\p{L}0-9_·\s]{0,20}$""",
+                """^(?:帮我|给我|请|帮忙|麻烦|能不能|可以)?\s*(?:播放|放)\s*[\p{L}0-9_·\s]{1,16}(?:的歌|歌曲|曲子|音乐)$""",
+                """^(?:帮我|给我|请|帮忙|麻烦|能不能|可以)?\s*(?:播放|放)\s*[\p{L}0-9_·\s]{1,10}$""",
+                """^(?:please\s+)?play\s+[\p{L}0-9_' -]{1,40}$""",
+            ),
+            // 「播放器的设计」这类句子里有「播放」，但那是话题不是指令。
+            // 最多 20 个排除词（AssistantRouteStore 的校验上限）。
+            exclude = listOf(
+                "设计", "方案", "接口", "代码", "实现", "优化", "排查", "日志",
+                "讨论", "开发", "架构", "重构", "原理", "为什么", "是什么",
+                "逻辑", "播放器", "播放列表", "播放状态", "参数",
+            ),
+            confirm = ConfirmMode.NEVER,
+        ),
+        r(
+            "life.music-next", "Next track", "life", "media", "next", 146,
+            listOf("下一首", "下一首歌", "换一首", "next track", "next song"),
+            confirm = ConfirmMode.NEVER,
+        ),
+        r(
+            "life.music-prev", "Previous track", "life", "media", "previous", 146,
+            listOf("上一首", "上一首歌", "previous track", "previous song"),
+            confirm = ConfirmMode.NEVER,
         ),
         r(
             "life.contacts", "Call contact", "life", "contacts", "dial", 210,
@@ -301,6 +352,25 @@ object DefaultAssistantRoutes {
         if (fromVersion < 3) {
             routes = routes.filterNot {
                 it.id in RETIRED_AT_V3 && it.capability == "media"
+            }
+        }
+        if (fromVersion < 4) {
+            // v4 adds question/command patterns to the built-in weather route.
+            // Merge rather than replace: a user who added keywords to this
+            // route keeps them, but the new patterns start deciding whether a
+            // bare mention of 天气 is a command or just a topic.
+            val weather = all.firstOrNull { it.id == "life.weather" }
+            if (weather != null) {
+                routes = routes.map { route ->
+                    if (route.id != "life.weather") {
+                        route
+                    } else {
+                        route.copy(
+                            keywords = (route.keywords + weather.keywords).distinct(),
+                            patterns = (route.patterns + weather.patterns).distinct(),
+                        )
+                    }
+                }
             }
         }
         if (fromVersion < SEED_VERSION) {

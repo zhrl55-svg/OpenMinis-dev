@@ -454,6 +454,11 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
+    // [T-music-player-top] Media3 ExoPlayer for the in-app music player.
+    // 1.4.1 is the version already present in the Gradle cache; the player
+    // streams the NetEase URLs the buntu proxy hands out.
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 

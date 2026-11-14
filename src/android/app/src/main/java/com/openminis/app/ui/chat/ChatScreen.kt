@@ -213,6 +213,7 @@ import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -815,6 +816,12 @@ fun ChatScreen(
     val selectedGroupName by viewModel.selectedGroupName.collectAsState()
     val providerName by viewModel.providerName.collectAsState()
     val pendingLocalAction by viewModel.pendingLocalAction.collectAsState()
+    val localVoicePhase by viewModel.localVoiceConfirmPhase.collectAsState()
+    // [T-music-player-top] The music player is a process-wide singleton, so
+    // the mini bar keeps showing the same track while the user moves
+    // between chats.
+    val musicController = remember(context) { com.openminis.app.media.music.MusicPlayerController.get(context) }
+    val musicState by musicController.state.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Shared 3-stage RECORD_AUDIO permission flow (system dialog → post-DENY
@@ -3903,6 +3910,33 @@ fun ChatScreen(
                 .imePadding()
                 .onGloballyPositioned { chatPaneWidthPx = it.size.width },
         ) {
+            // [T-music-player-top] The mini player floats over the message
+            // list at the top of the chat. It slides in as soon as a track
+            // starts playing - the controls appear where the user is already
+            // looking instead of in a menu. Floating (not docked into the
+            // top bar) is what makes the translucent card read as
+            // translucent: messages pass underneath it while scrolling.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = musicState.hasTrack,
+                // Declared before the list Column, so it needs an explicit
+                // z-order to stay on top of it.
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .zIndex(2f),
+                enter = androidx.compose.animation.slideInVertically(
+                    animationSpec = androidx.compose.animation.core.tween(280),
+                    initialOffsetY = { -it },
+                ) + androidx.compose.animation.fadeIn(),
+                exit = androidx.compose.animation.slideOutVertically(
+                    animationSpec = androidx.compose.animation.core.tween(220),
+                    targetOffsetY = { -it },
+                ) + androidx.compose.animation.fadeOut(),
+            ) {
+                com.openminis.app.ui.media.music.MusicPlayerBar(
+                    onStop = { musicController.stop() },
+                )
+            }
+
         Column(
             modifier = Modifier.fillMaxSize(),
         ) {
@@ -6592,8 +6626,11 @@ fun ChatScreen(
                         // floating card separated from the backdrop by a
                         // painted shadow — so this travelling arc is the only
                         // thing that says the microphone is open.
+                        // 本地写操作的语音确认复用同一道流光：卡片弹出的同时
+                        // 输入框就有动态效果，用户知道可以直接说「确认」。
                         .holdToTalkGlow(
-                            active = holdToTalkListening || wakeListening,
+                            active = holdToTalkListening || wakeListening ||
+                                localVoicePhase != com.openminis.app.ui.chat.voice.VoiceConfirmPhase.IDLE,
                             cornerRadius = 20.dp,
                         )
                         .padding(top = if (attachments.isNotEmpty()) 8.dp else 4.dp),
@@ -7883,6 +7920,13 @@ fun ChatScreen(
             pendingLocalAction?.let { action ->
                 LocalActionConfirmDialog(
                     action = action,
+                    voiceStatus = when (localVoicePhase) {
+                        com.openminis.app.ui.chat.voice.VoiceConfirmPhase.LISTENING ->
+                            stringResource(R.string.assistant_voice_status_listening)
+                        com.openminis.app.ui.chat.voice.VoiceConfirmPhase.SPEAKING ->
+                            stringResource(R.string.assistant_voice_status_speaking)
+                        else -> null
+                    },
                     onConfirm = { choiceId -> viewModel.confirmLocalAction(choiceId) },
                     onDismiss = { viewModel.cancelLocalAction() },
                 )

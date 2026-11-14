@@ -179,12 +179,59 @@ object VoiceOutputState {
     fun suspendAllForCapture() {
         val live = synchronized(players) { players.toList() }
         live.forEach { runCatching { it.suspendForCapture() } }
+        runCatching { captureSuspendable?.suspendForCapture() }
     }
 
     /** Resume every player parked by [suspendAllForCapture]. */
     fun resumeAllAfterCapture() {
         val live = synchronized(players) { players.toList() }
         live.forEach { runCatching { it.resumeAfterCapture() } }
+        runCatching { captureSuspendable?.resumeAfterCapture() }
+    }
+
+    /**
+     * [T-music-player-top] Audio that is not a read-aloud player but still
+     * has to yield while the mic is open: the music player.
+     *
+     * The music would otherwise be recorded by the recognizer - the mic
+     * hears the song, the ASR transcribes the lyrics, and the assistant
+     * answers a line nobody sang to it. The read-aloud players have their
+     * own stack above; this is the one slot for "everything else that makes
+     * noise".
+     */
+    interface CaptureSuspendable {
+        /** Called right before the mic opens. */
+        fun suspendForCapture()
+
+        /** Called when the capture ended, however it ended. */
+        fun resumeAfterCapture()
+    }
+
+    @Volatile
+    private var captureSuspendable: CaptureSuspendable? = null
+
+    fun registerCaptureSuspendable(source: CaptureSuspendable?) {
+        captureSuspendable = source
+    }
+
+    /**
+     * [T-music-player-top] True while ANY app speech source is speaking.
+     *
+     * The music ducks for it: the assistant's spoken answer has to be heard
+     * over the song, not under it. Sources register themselves and are held
+     * weakly, so a short-lived TTS manager does not leak.
+     */
+    private val speechSources = java.util.WeakHashMap<TextToSpeechManager, Boolean>()
+
+    fun registerSpeechSource(source: TextToSpeechManager) {
+        synchronized(speechSources) { speechSources[source] = true }
+    }
+
+    /** Whether any registered speech source is speaking right now. */
+    fun anySpeechSpeaking(): Boolean = synchronized(speechSources) {
+        speechSources.keys.any { source ->
+            runCatching { source.isSpeaking.value }.getOrDefault(false)
+        }
     }
 
     fun init(context: Context) {
