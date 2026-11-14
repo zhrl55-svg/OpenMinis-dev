@@ -2,6 +2,7 @@ package com.openminis.app.assistant.execution
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalActionSpeechTest {
@@ -101,6 +102,51 @@ class LocalActionSpeechTest {
                 output = "没有找到匹配“会议”的日程\n未执行。",
             ),
         )
+    }
+
+    @Test
+    fun `choice understands ordinals in both languages`() {
+        val titles = listOf("项目评审", "周会", "客户拜访")
+        assertEquals(0, LocalActionSpeech.choice("第一个", titles))
+        assertEquals(1, LocalActionSpeech.choice("选第二个", titles))
+        assertEquals(2, LocalActionSpeech.choice("第三个吧", titles))
+        assertEquals(1, LocalActionSpeech.choice("2", titles))
+        assertEquals(2, LocalActionSpeech.choice("第3个", titles))
+        assertEquals(0, LocalActionSpeech.choice("first", titles))
+        assertEquals(1, LocalActionSpeech.choice("number two", titles))
+        // 直接说标题也认。
+        assertEquals(1, LocalActionSpeech.choice("第二个 周会", titles))
+        assertEquals(2, LocalActionSpeech.choice("客户拜访", titles))
+    }
+
+    @Test
+    fun `choice ignores unrelated speech and out of range`() {
+        val titles = listOf("项目评审", "周会")
+        listOf("确认", "取消", "等一下", "帮我看看", "今天天气").forEach {
+            assertEquals(it, null, LocalActionSpeech.choice(it, titles))
+        }
+        assertEquals(null, LocalActionSpeech.choice("第五个", titles))
+        assertEquals(null, LocalActionSpeech.choice("第一个", emptyList()))
+        // 单字序号只在短句里认：「统一一下」不是选第一。
+        assertEquals(null, LocalActionSpeech.choice("统一一下时间", titles))
+    }
+
+    @Test
+    fun `choice prompt reads up to three names`() {
+        val zh = LocalActionSpeech.choicePrompt(
+            listOf("项目评审", "周会", "客户拜访", "第四个不会念"),
+            chinese = true,
+        )
+        assertTrue(zh.contains("4 个匹配"))
+        assertTrue(zh.contains("第一个 项目评审"))
+        assertTrue(zh.contains("第三个 客户拜访"))
+        assertTrue(!zh.contains("第四个不会念"))
+        assertTrue(zh.contains("取消"))
+
+        val en = LocalActionSpeech.choicePrompt(listOf("Review", "Standup"), chinese = false)
+        assertTrue(en.contains("2 matches"))
+        assertTrue(en.contains("1. Review"))
+        assertTrue(en.contains("cancel"))
     }
 
     @Test

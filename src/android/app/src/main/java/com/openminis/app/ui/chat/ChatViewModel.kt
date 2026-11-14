@@ -11391,6 +11391,18 @@ class ChatViewModel(
 
         if (!execution.success && isReadOnly) {
             fastPath.trace(context, "read-failed -> cloud: ${execution.output.take(160)}")
+            // 端侧天气失败（定位权限/网络）不再静默转云端：用户会以为
+            // 助理没听懂天气请求。给一条灰色系统提示说明发生了什么，
+            // 云端结果随后照常出现。
+            if (local.capability == "weather") {
+                withContext(Dispatchers.Main) {
+                    appendSystemInfo(
+                        "本地天气查询失败，已转由云端继续：" +
+                            execution.output.lineSequence().firstOrNull().orEmpty().take(80),
+                        "info",
+                    )
+                }
+            }
             return false
         }
 
@@ -11517,13 +11529,20 @@ class ChatViewModel(
             context,
             "confirm-wait: ${decision.capability}/${decision.action} choices=${choices.size}",
         )
-        localActionVoice.start(pending) { confirmed ->
-            if (confirmed) {
-                confirmLocalAction(source = "voice")
-            } else {
-                cancelLocalAction(source = "voice")
-            }
-        }
+        localActionVoice.start(
+            pending,
+            onDecision = { confirmed ->
+                if (confirmed) {
+                    confirmLocalAction(source = "voice")
+                } else {
+                    cancelLocalAction(source = "voice")
+                }
+            },
+            onChoice = { choiceId ->
+                // 多候选的语音选条：「第一个」直接选中并执行。
+                confirmLocalAction(choiceId = choiceId, source = "voice")
+            },
+        )
         val result = try {
             withTimeoutOrNull(LOCAL_CONFIRM_TIMEOUT_MS) { deferred.await() }
                 ?: LocalConfirmationResult(LocalConfirmationOutcome.TIMEOUT)

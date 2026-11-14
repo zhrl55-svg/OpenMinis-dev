@@ -43,8 +43,8 @@ enum class VoiceConfirmPhase { IDLE, LISTENING, SPEAKING }
  *  3. 肯定 → [onDecision] true（ViewModel 执行并收起卡片）；
  *     否定 → false（取消）；没听清 → 再问一次，仍不明白就把卡片留给手指。
  *
- * 多候选（同名日程）不在这里选：语音挑不出具体哪一条，只念一句提示让用户
- * 在屏幕上点。
+ * 多候选（同名日程）用序号回答：「第一个」「第二个」「选 2」，也可以直接
+ * 说候选标题；说「取消」放弃。没听懂再问一次，仍不明白就把卡片留给手指。
  *
  * 任何一步失败（TTS 未就绪、识别器不可用、没有麦克风权限）都静默退回确认卡，
  * 这条语音链路是可选的辅助，不是执行的前置条件。
@@ -67,9 +67,14 @@ class LocalActionVoiceConfirmer(context: Context) {
     }
 
     /**
-     * 开始一次语音确认。回调在主线程触发；[onDecision] 为 true 表示用户确认。
+     * 开始一次语音确认。回调在主线程触发；[onDecision] 为 true 表示用户确认，
+     * [onChoice] 带回多候选时选中的候选 id（单候选不会调用）。
      */
-    fun start(action: LocalActionConfirmation, onDecision: (Boolean) -> Unit) {
+    fun start(
+        action: LocalActionConfirmation,
+        onDecision: (Boolean) -> Unit,
+        onChoice: (String) -> Unit = {},
+    ) {
         stop()
         // 先按“正在播报”点亮：run() 会立刻开始 TTS，避免先闪一下“正在聆听”。
         _phase.value = VoiceConfirmPhase.SPEAKING
@@ -80,7 +85,7 @@ class LocalActionVoiceConfirmer(context: Context) {
         job = scope.launch {
             try {
                 com.openminis.app.llm.mnn.AssistantFastPath.trace(appContext, "voice: run")
-                run(action, onDecision)
+                run(action, onDecision, onChoice)
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
@@ -182,15 +187,18 @@ class LocalActionVoiceConfirmer(context: Context) {
         }
     }
 
-    private suspend fun run(action: LocalActionConfirmation, onDecision: (Boolean) -> Unit) {
+    private suspend fun run(
+        action: LocalActionConfirmation,
+        onDecision: (Boolean) -> Unit,
+        onChoice: (String) -> Unit,
+    ) {
         val resources = LocaleWrap.wrap(appContext).resources
+        val chinese = resources.configuration.locales[0].language.startsWith("zh")
         if (action.choices.isNotEmpty()) {
-            _phase.value = VoiceConfirmPhase.SPEAKING
-            speak(resources.getString(R.string.assistant_voice_confirm_choices))
+            runChoices(action, chinese, resources, onDecision, onChoice)
             return
         }
 
-        val chinese = resources.configuration.locales[0].language.startsWith("zh")
         val subject = LocalActionSpeech.subject(
             capability = action.capability,
             action = action.action,
@@ -231,6 +239,79 @@ class LocalActionVoiceConfirmer(context: Context) {
                 AppLogger.info(TAG, "voice confirmation: no usable answer, leaving the card open")
             }
         }
+    }
+
+    /**
+     * 多候选：念序号 + 名字，听「第几个 / 取消 / 标题」。
+     *
+     * 和确认流程一样先播报再开麦，没听懂再问一次；两次都空就把卡片留给手。
+     */
+    private suspend fun runChoices(
+        action: LocalActionConfirmation,
+        chinese: Boolean,
+        resources: android.content.res.Resources,
+        onDecision: (Boolean) -> Unit,
+        onChoice: (String) -> Unit,
+    ) {
+        val titles = action.choices.map { it.title }
+        val prompt = LocalActionSpeech.choicePrompt(titles, chinese)
+        _phase.value = VoiceConfirmPhase.SPEAKING
+        val spoke = speak(prompt)
+        if (!spoke) {
+            _phase.value = VoiceConfirmPhase.LISTENING
+            if (!handleChoice(listenOnce(LISTEN_WINDOW_MS), action, onDecision, onChoice)) {
+                AppLogger.info(TAG, "voice choice: no usable answer, leaving the card open")
+            }
+            return
+        }
+        delay(ECHO_GUARD_MS)
+        _phase.value = VoiceConfirmPhase.LISTENING
+        if (handleChoice(listenOnce(LISTEN_WINDOW_MS), action, onDecision, onChoice)) return
+
+        AppLogger.info(TAG, "voice choice: retry prompt")
+        _phase.value = VoiceConfirmPhase.SPEAKING
+        if (speak(resources.getString(R.string.assistant_voice_confirm_retry))) {
+            delay(ECHO_GUARD_MS)
+            _phase.value = VoiceConfirmPhase.LISTENING
+            if (!handleChoice(listenOnce(LISTEN_WINDOW_MS), action, onDecision, onChoice)) {
+                AppLogger.info(TAG, "voice choice: no usable answer, leaving the card open")
+            }
+        }
+    }
+
+    /** @return true 表示已经选好候选或取消。 */
+    private fun handleChoice(
+        heard: String?,
+        action: LocalActionConfirmation,
+        onDecision: (Boolean) -> Unit,
+        onChoice: (String) -> Unit,
+    ): Boolean {
+        com.openminis.app.llm.mnn.AssistantFastPath.trace(
+            appContext,
+            "voice: heard ${heard?.take(40) ?: "null"}",
+        )
+        if (heard.isNullOrBlank()) return false
+        if (LocalActionSpeech.decision(heard) == VoiceConfirmationDecision.CANCEL) {
+            AppLogger.info(TAG, "voice choice: cancel 「${heard.take(40)}」")
+            onDecision(false)
+            return true
+        }
+        val index = LocalActionSpeech.choice(heard, action.choices.map { it.title })
+        if (index != null) {
+            val choice = action.choices[index]
+            AppLogger.info(TAG, "voice choice: #${index + 1} ${choice.title}")
+            onChoice(choice.id)
+            return true
+        }
+        // 「确认」没带序号：只有唯一候选时无歧义。
+        if (action.choices.size == 1 &&
+            LocalActionSpeech.decision(heard) == VoiceConfirmationDecision.CONFIRM
+        ) {
+            onChoice(action.choices.first().id)
+            return true
+        }
+        AppLogger.info(TAG, "voice choice: unclear 「${heard.take(40)}」")
+        return false
     }
 
     /** @return true 表示已经做出确认/取消决定。 */

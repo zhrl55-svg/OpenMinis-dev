@@ -120,6 +120,90 @@ object LocalActionSpeech {
     }
 
     /**
+     * 多候选时播报的选择提示。
+     *
+     * 最多念三候选的序号和名字：同名日程的候选通常两三条，全念出来
+     * 既慢又难记；卡片上完整列表还在，用户可以看。
+     */
+    fun choicePrompt(titles: List<String>, chinese: Boolean): String {
+        val named = titles.take(MAX_SPOKEN_CHOICES)
+            .mapIndexed { index, title ->
+                val name = title.trim().take(24)
+                if (chinese) "${ordinalZh(index)} $name" else "${index + 1}. $name"
+            }
+        val count = titles.size
+        return if (chinese) {
+            "有 $count 个匹配：${named.joinToString("；")}。请说第几个，或说取消。"
+        } else {
+            "There are $count matches: ${named.joinToString(", ")}. Say the number, or cancel."
+        }
+    }
+
+    /**
+     * 从回答里解析用户选了第几个候选（0-based），没听懂返回 null。
+     *
+     * 支持「第一个 / 第2个 / 二 / 选第二个 / first / number two」，
+     * 以及直接说出候选标题（「第二个 评审」或只说「评审」）。
+     * 单字序号只在整句很短时才认，避免「统一」「一起」这类词误判。
+     */
+    fun choice(text: String, titles: List<String>): Int? {
+        if (titles.isEmpty()) return null
+        val normalized = normalize(text)
+        if (normalized.isEmpty()) return null
+        for (index in titles.indices) {
+            val tokens = ordinalTokens(index, titles.size)
+            val matched = tokens.any { token ->
+                if (token.length <= 1) {
+                    normalized.length <= 6 && normalized == token
+                } else {
+                    normalized.contains(token)
+                }
+            }
+            if (matched) return index
+        }
+        // 直接说标题：「第二个 评审」会先被序号命中；这里处理只说标题的情况。
+        val byTitle = titles.indices.filter { index ->
+            val title = normalize(titles[index])
+            title.length >= 2 && normalized.contains(title)
+        }
+        return byTitle.singleOrNull()
+    }
+
+    /** 第 [index] 个候选的常见说法（0-based）。 */
+    private fun ordinalTokens(index: Int, count: Int): List<String> {
+        val zh = listOf("一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+        val en = listOf("first", "second", "third", "fourth", "fifth")
+        val tokens = mutableListOf<String>()
+        if (index < zh.size) {
+            val n = zh[index]
+            tokens += "第$n"
+            tokens += "第${n}个"
+            tokens += "第${n}条"
+            tokens += "第${n}项"
+            tokens += "选$n"
+            tokens += n
+        }
+        if (index < count && index < 9) {
+            tokens += (index + 1).toString()
+            tokens += "第${index + 1}"
+            tokens += "第${index + 1}个"
+        }
+        if (index < en.size) {
+            tokens += en[index]
+            tokens += "number${index + 1}"
+            // 归一化会去掉空格：「number two」→「numbertwo」。
+            tokens += "number${NUMBER_WORDS[index]}"
+            tokens += NUMBER_WORDS[index]
+        }
+        return tokens
+    }
+
+    private fun ordinalZh(index: Int): String {
+        val zh = listOf("第一个", "第二个", "第三个", "第四个", "第五个")
+        return zh.getOrElse(index) { "第${index + 1}个" }
+    }
+
+    /**
      * 执行完成后的一句话播报。短、只说结果：成功报动作和目标，失败报首行错误。
      */
     fun completion(
@@ -159,6 +243,11 @@ object LocalActionSpeech {
     private fun normalize(text: String): String =
         text.lowercase(Locale.ROOT)
             .replace(Regex("""[\s，。！？、；：,.!?;:'"“”‘’]"""), "")
+
+    /** 语音提示最多念几个候选。 */
+    private const val MAX_SPOKEN_CHOICES = 3
+
+    private val NUMBER_WORDS = listOf("one", "two", "three", "four", "five")
 
     private val CANCEL_EXACT = setOf(
         "不", "不要", "不用", "不是", "别", "取消", "算了",

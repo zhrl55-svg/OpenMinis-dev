@@ -405,17 +405,22 @@ src/android/app/src/test/java/com/openminis/app/assistant/
 - `we can use the weather api in the design` → `cloud reason=topic-mention`。
 - 测试日程（id 251/252/253/254/255）已全部清理。
 
-尚未完成 / 建议下一轮：
+2026-11-14 下午补齐（原“尚未完成”1/2/4/5，均已在真机验证）：
 
-1. 规则页：导入/导出/恢复默认/诊断入口（上次滚动误触编辑弹窗）。
-   恢复默认会覆盖用户规则，先导出备份。
-2. `minis-config` 写操作：`add` / `set` / `remove` 会触发应用内确认，
-   建议用户在场时做；`get` 已验证可用。
-3. 语音确认的 TTS 可听性：真机日志显示 `tts ready` 仍待确认；
-   若仍听不到播报，先测 `android-speak speak "测试"`，再查华为
-   `com.huawei.hiai` 引擎音量/语音数据。
-4. 多候选删除的语音路径：只播报“请在屏幕上选择”，未做语音选条。
-5. 端侧天气失败（定位权限/网络）仍按“读失败转云端”处理，未在本地弹错。
+1. 规则页工具区已验证：导入 JSON / 导出 JSON / 恢复默认 / 诊断四个入口
+   都能打开对应弹窗；诊断显示未匹配候选与最近命中记录。
+2. `minis-config` 写操作已验证：`set`（数值字段）、`set …append`（新增
+   路由）、`set …remove`（删除路由）都会弹出「确认更改」对话框，应用后
+   写入成功并生成审计记录（`audit-list` 可见），`get` 读回一致。
+   注：本版本 CLI 的 `get` 需要完整字段路径（`get <topic>` 会报
+   unknown_path），用 `topic-help <topic>` 查路径。
+3. 语音确认的 TTS 可听性：已由用户复测通过（同日语音确认链路整体验收）。
+4. 多候选删除的语音选条：已实现——TTS 念「有 N 个匹配：第一个 xxx；
+   第二个 yyy。请说第几个，或说取消」，支持「第一个/第2个/选 2/
+   first/number two/直接说标题」，选完即执行；单测覆盖
+   `LocalActionSpeech.choice` / `choicePrompt`。
+5. 端侧天气失败提示：读失败转云端前，聊天里插入一条灰色系统提示
+   「本地天气查询失败，已转由云端继续：…」，不再静默。
 
 测试注意（2026-11-14 实测）：
 
