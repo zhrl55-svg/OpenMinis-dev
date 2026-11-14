@@ -67,6 +67,10 @@ class SlotExtractor(
                 listOf("我说过", "我的记忆", "之前说过", "查记忆", "what did i say", "my memory"),
             )?.let { args.put("keywords", it) }
             "amap_search" -> args.put("query", extractPlaceQuery(text))
+            // The tools own query normalization (news strips command words,
+            // stocks scan for an index keyword), so passing the full sentence
+            // keeps the local path deterministic and model-free.
+            "news_search", "stock_quote" -> args.put("query", text)
             "file_edit" -> {
                 pathRegex.find(text)?.let { args.put("path", it.value) }
             }

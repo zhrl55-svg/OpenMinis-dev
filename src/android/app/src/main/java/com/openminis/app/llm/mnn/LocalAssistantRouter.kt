@@ -112,6 +112,8 @@ object LocalAssistantRouter {
             "browser_use" -> args.optString("action", "").equals("navigate", ignoreCase = true)
             // amap_search 只读（查地点），query 已过子序列校验。
             "amap_search" -> true
+            // news_search / stock_quote 也是只读网络查询，没有设备副作用。
+            "news_search", "stock_quote" -> true
             // file_read / memory_get 是只读的，路径和参数都已经过逐词校验。
             else -> true
         }

@@ -66,6 +66,8 @@ object LocalActionSpeech {
             "hub_call" to "call" -> "远程执行"
             "read_image" to "read" -> "读取图片"
             "amap_search" to "search" -> "搜索地点"
+            "news_search" to "search" -> "查询新闻"
+            "stock_quote" to "quote" -> "查询行情"
             else -> fallbackLabel.ifBlank { "$capability/$action" }
         }
     }
@@ -204,6 +206,26 @@ object LocalActionSpeech {
     }
 
     /**
+     * 结果没有专属 [LocalSpokenSummary] 时，是否仍应播报通用的完成提示。
+     *
+     * 三层策略：
+     *  1. 内容型只读结果（新闻、行情、日程列表…）有自己的语音摘要，先播摘要；
+     *  2. 改变状态的动作（即使无需确认卡）播一句「已…：目标」，语音用户才知道
+     *     操作真的落地了；
+     *  3. 媒体控制与读图保持安静：播放器界面已经反映新状态，把「已控制播放」
+     *     念在音乐上只是噪音，图片内容也不适合一句话概括。
+     *
+     * @param readOnly 来自
+     *   [com.openminis.app.assistant.routing.LocalCapabilityRegistry.isReadOnly]
+     */
+    fun shouldSpeakCompletion(capability: String, action: String, readOnly: Boolean): Boolean {
+        if (capability == "media" || capability == "read_image") return false
+        // 只读结果应走摘要；没有摘要（空结果、无法识别的输出）时说
+        // 「已查询…」不提供任何信息，保持安静。
+        return !readOnly
+    }
+
+    /**
      * 执行完成后的一句话播报。短、只说结果：成功报动作和目标，失败报首行错误。
      */
     fun completion(
@@ -229,7 +251,15 @@ object LocalActionSpeech {
         }
         val target = args.optString("title").ifBlank {
             args.optString("name").ifBlank {
-                args.optString("app").ifBlank { args.optString("id_or_title") }
+                args.optString("app").ifBlank {
+                    args.optString("id_or_title").ifBlank {
+                        args.optString("label").ifBlank {
+                            args.optString("url").ifBlank {
+                                args.optString("prompt").ifBlank { args.optString("query") }
+                            }
+                        }
+                    }
+                }
             }
         }.trim().take(30)
         return if (chinese) {

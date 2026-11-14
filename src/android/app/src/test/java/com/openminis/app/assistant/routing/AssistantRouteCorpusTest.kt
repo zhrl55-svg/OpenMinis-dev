@@ -146,6 +146,15 @@ class AssistantRouteCorpusTest {
         local("搜索联系人 Alice", "contacts", "search"),
         local("打开微信", "app_launch", "open"),
 
+        // News and A-share quotes (key-free read-only network tools)
+        local("今天有什么科技新闻", "news_search", "search"),
+        local("帮我看看财经新闻", "news_search", "search"),
+        local("今天有什么财经消息", "news_search", "search"),
+        local("最近有什么国际新闻", "news_search", "search"),
+        local("上证指数现在多少", "stock_quote", "quote"),
+        local("今天大盘怎么样", "stock_quote", "quote"),
+        local("深证成指涨了还是跌了", "stock_quote", "quote"),
+
         // Unrelated chat / deliberate low-information commands
         cloud("你好呀"),
         cloud("你是谁"),
@@ -175,6 +184,12 @@ class AssistantRouteCorpusTest {
         cloud("schedule"),
         cloud("会议"),
         cloud("删除"),
+        // Mentioning finance/news vocabulary is not the same as asking for data.
+        cloud("指数基金怎么买"),
+        cloud("新闻学专业怎么样"),
+        cloud("怎么对接新闻接口"),
+        cloud("我们在讨论股票接口的方案"),
+        cloud("看看未读消息"),
     )
 
     @Test

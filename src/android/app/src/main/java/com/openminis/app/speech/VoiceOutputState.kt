@@ -93,6 +93,17 @@ object VoiceOutputState {
     val isSpeaking = MutableStateFlow(false)
     val isSynthesizing = MutableStateFlow(false)
 
+    /**
+     * Text of the utterance the active [ReadAloudPlayer] is playing right now,
+     * or "" when nothing is playing.
+     *
+     * The wake service listens on the microphone while read-aloud audio is in
+     * the stream (barge-in). To tell the user's "停一下" apart from the
+     * assistant's own voice, it needs the words being spoken; the player that
+     * owns the capsule publishes them here.
+     */
+    val currentSpeechText = MutableStateFlow("")
+
     /** Label of the model that is ACTUALLY synthesizing (post fail-over). */
     val activeModelLabel = MutableStateFlow<String?>(null)
 
@@ -187,6 +198,21 @@ object VoiceOutputState {
         val live = synchronized(players) { players.toList() }
         live.forEach { runCatching { it.resumeAfterCapture() } }
         runCatching { captureSuspendable?.resumeAfterCapture() }
+    }
+
+    /**
+     * Stop every registered player, keeping them registered.
+     *
+     * Used by the wake service's barge-in path: a spoken stop command must
+     * silence whichever channel is audible (cloud reply, local assistant
+     * announcement, selection read-aloud) — not only the wake conversation's
+     * private TTS. Stopping all rather than just [activePlayer] covers the
+     * case where two channels overlap.
+     */
+    fun stopAllPlayers() {
+        val live = synchronized(players) { players.toList() }
+        live.forEach { runCatching { it.stop() } }
+        currentSpeechText.value = ""
     }
 
     /**

@@ -1,7 +1,7 @@
 package com.openminis.app.assistant.routing
 
 object DefaultAssistantRoutes {
-    const val SEED_VERSION = 5
+    const val SEED_VERSION = 6
 
     private val RETIRED_AT_V3 = setOf("life.media")
 
@@ -80,6 +80,51 @@ object DefaultAssistantRoutes {
         r(
             "tool.amap", "Search nearby places", "network", "amap_search", "search", 90,
             listOf("附近", "周边", "周围", "旁边", "最近的", "找一家", "找个", "地址是", "怎么去", "nearby"),
+        ),
+
+        // ── Information: news and A-share quotes ───────────────────────
+        // Read-only, key-free network tools. Both are also registered as agent
+        // tools, so the cloud Agent and scheduled tasks can call them; these
+        // routes make them reachable in assistant mode without a cloud round.
+        r(
+            "info.news", "Search news", "life", "news_search", "search", 168,
+            listOf(
+                "新闻", "资讯", "热点", "头条", "最新消息", "最新动态",
+                "科技新闻", "财经新闻", "股票新闻", "财经消息", "股市消息", "娱乐新闻",
+                "国际新闻", "国内新闻", "AI 动态", "最近发生", "最新情况",
+                "news", "headlines", "latest news",
+            ),
+            patterns = listOf(
+                """(?:今天|最近|现在|刚刚|这几天).{0,6}(?:有什么|有啥|发生|出).{0,4}(?:新闻|资讯|热点|头条)""",
+                """(?:看看|看一下|查一下|搜一下|来点|说说|讲讲|播报).{0,6}(?:新闻|资讯|热点|头条)""",
+                """(?:新闻|资讯|热点|头条).{0,6}(?:是什么|有哪些|怎么样)""",
+                """\b(?:latest|today'?s|breaking)\s+news\b""",
+                """\bnews\b.{0,12}\b(?:today|latest|headlines)\b""",
+            ),
+            exclude = listOf(
+                "每天", "每周", "定时", "提醒我", "闹钟", "日程", "新闻学", "新闻专业",
+                "新闻稿", "发布会", "微信", "短信", "邮件", "接口", "代码", "实现", "讨论", "方案",
+            ),
+            examples = listOf("今天有什么科技新闻", "帮我看看财经新闻"),
+            confirm = ConfirmMode.NEVER,
+        ),
+        r(
+            "info.stock", "Stock quotes", "life", "stock_quote", "quote", 158,
+            listOf(
+                "上证", "深证", "沪指", "大盘", "创业板", "沪深", "A股", "a股",
+                "股市", "股价", "股票", "行情", "涨了", "跌了", "涨停", "跌停",
+            ),
+            patterns = listOf(
+                """(?:上证|深证|创业板|沪深|沪指|大盘|A股|a股|股市|股票|股价).{0,8}(?:指数|行情|多少点|多少|涨|跌|怎么样|如何)""",
+                """(?:今天|现在|目前).{0,6}(?:大盘|股市|A股).{0,8}(?:怎么样|如何|多少)""",
+                """\b(?:stock|index|market)\b.{0,20}\b(?:today|now|how|quote)\b""",
+            ),
+            exclude = listOf(
+                "新闻", "资讯", "消息", "热点", "头条", "基金", "ETF", "etf",
+                "开户", "交易", "定投", "怎么买", "讨论", "接口", "代码", "实现", "方案", "指数基金",
+            ),
+            examples = listOf("上证指数现在多少", "今天大盘怎么样"),
+            confirm = ConfirmMode.NEVER,
         ),
 
         // ── Life: alarm, reminder, calendar ────────────────────────────

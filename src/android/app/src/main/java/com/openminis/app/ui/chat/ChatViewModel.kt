@@ -67,6 +67,8 @@ import com.openminis.app.tools.MemoryTools
 import com.openminis.app.tools.BatchToolOrder
 import com.openminis.app.tools.ReadImageTool
 import com.openminis.app.tools.AmapSearchTool
+import com.openminis.app.tools.NewsSearchTool
+import com.openminis.app.tools.StockQuoteTool
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.offload.OffloadPermissionManager
 import com.openminis.app.service.SessionActivityTracker
@@ -11428,7 +11430,18 @@ class ChatViewModel(
                 "len=${execution.output.length} elapsed=${elapsed}ms",
         )
         // 经过确认的写操作完成后简短播报结果（语音场景闭环）。
-        if (local.needsConfirmation) {
+        // 只读信息类（新闻/行情/列表）没有确认卡，但会带一个简短的 spokenSummary，
+        // 让「今天有什么科技新闻」在语音场景下也能直接听到前几条标题。
+        // 无需确认的普通写操作同样播一句完成提示；媒体控制/读图按三层策略保持安静。
+        if (execution.spokenSummary.isNotBlank()) {
+            localActionVoice.announceSummary(execution.spokenSummary)
+        } else if (
+            com.openminis.app.assistant.execution.LocalActionSpeech.shouldSpeakCompletion(
+                local.capability,
+                local.action,
+                isReadOnly,
+            )
+        ) {
             localActionVoice.announceCompletion(
                 capability = local.capability,
                 action = local.action,
@@ -11475,6 +11488,16 @@ class ChatViewModel(
                 output = result.output,
                 success = result.success,
             ),
+            spokenSummary = result.spokenSummary.ifBlank {
+                // Tools without their own summary (memory recall) still get a
+                // conservative read-out here; everything else stays silent
+                // and falls back to the completion policy.
+                com.openminis.app.assistant.execution.LocalSpokenSummary.forTool(
+                    decision.capability,
+                    result.output,
+                    result.success,
+                )
+            },
         )
     }
 
@@ -14848,6 +14871,18 @@ class ChatViewModel(
                 // [T-mnn-local] 地点查询。同步 HTTP，放 IO 线程（executeTool 已在 IO 上下文）。
                 withContext(Dispatchers.IO) {
                     AmapSearchTool.execute(context, argsJson)
+                }
+            }
+            NewsSearchTool.NAME -> {
+                // Key-free Google News RSS; blocking HTTP lives on IO.
+                withContext(Dispatchers.IO) {
+                    NewsSearchTool.execute(argsJson)
+                }
+            }
+            StockQuoteTool.NAME -> {
+                // Key-free Sina quote endpoint; blocking HTTP lives on IO.
+                withContext(Dispatchers.IO) {
+                    StockQuoteTool.execute(argsJson)
                 }
             }
             FileReadTool.NAME -> {
@@ -19303,6 +19338,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         "memory_get" -> "Read Memory"
         com.openminis.app.agent.userask.UserAskPromptText.TOOL_NAME -> "Question for you"
         "web_search" -> "Search Web"
+        "news_search" -> "Search News"
+        "stock_quote" -> "Stock Quotes"
         else -> toolName
             .split('_')
             .filter { it.isNotEmpty() }

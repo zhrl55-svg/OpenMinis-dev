@@ -161,4 +161,15 @@ class SlotExtractorTest {
         assertTrue(out.ambiguous)
         assertEquals("2026-11-14T00:00:00", out.args.getString("at"))
     }
+
+    @Test
+    fun `news and stock queries are optional and model-free`() {
+        val news = extract("今天有什么科技新闻", "info.news")
+        assertEquals("今天有什么科技新闻", news.args.getString("query"))
+        assertTrue(news.missing.isEmpty())
+
+        val stock = extract("上证指数现在多少", "info.stock")
+        assertEquals("上证指数现在多少", stock.args.getString("query"))
+        assertTrue(stock.missing.isEmpty())
+    }
 }

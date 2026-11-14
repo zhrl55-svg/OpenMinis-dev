@@ -161,6 +161,15 @@ class HoldToTalkController(private val context: Context) {
                     }
                 }
             },
+            // [T-voice-request-silence] A long dictation must not be cut by
+            // the clock. People pause inside sentences; the old 600 ms
+            // silence window split every natural pause into a segment (each
+            // re-checked against the voiceprint, so a rejected segment
+            // silently lost a chunk), and the 15 s cap chopped continuous
+            // speech in half. End a segment only after 1.2 s of quiet, and
+            // keep the 60 s cap as a safety valve, not as endpointing.
+            minSilenceMs = { HOLD_SILENCE_MS },
+            maxSegmentMs = { HOLD_MAX_SEGMENT_MS },
         )
         vad = detector
         val recorder = WakeAudioCapture(
@@ -406,6 +415,12 @@ class HoldToTalkController(private val context: Context) {
 
         /** How long a hold may stay open without an accepted sentence. */
         const val LISTEN_WINDOW_MS = 8_000L
+
+        /** 句中自然停顿：超过这个静音才认为这一句说完了。 */
+        const val HOLD_SILENCE_MS = 1_200
+
+        /** 安全阀：一直不停顿的长语音最多 60 秒切一段。 */
+        const val HOLD_MAX_SEGMENT_MS = 60_000
 
         /** How often the idle window is checked. */
         const val WATCHDOG_TICK_MS = 500L

@@ -86,11 +86,27 @@ class WakeWordService : Service() {
         /**
          * How long the assistant keeps listening for the request.
          *
-         * The clock starts at the wake hit and is renewed after every
-         * accepted utterance, so a conversation continues while the user is
-         * talking and the assistant goes back to sleep once the user stops.
+         * This is a SILENCE window, not a speech cap: it starts at the wake
+         * hit / after the reply and is renewed while the VAD reports speech,
+         * so a long uninterrupted request is never cut off mid-sentence
+         * ("长语音只进去前半段"). Once the speaker has been quiet for this
+         * long with nothing buffered, the assistant goes back to sleep.
          */
         private const val CONVERSATION_WINDOW_MS = 8_000L
+
+        /**
+         * [T-voice-request-silence] Quiet time that ends a spoken request.
+         *
+         * 1.2 s, not the VAD's 600 ms default: people pause inside long
+         * sentences, and cutting on the first short gap sent only the first
+         * half of a request to the model. This is now the ONLY rule that
+         * ends a request — the conversation deadline above is a silence
+         * window and is renewed while the user keeps talking.
+         */
+        private const val REQUEST_SILENCE_MS = 1_200
+
+        /** Safety valve only: a request that never pauses is cut here. */
+        private const val REQUEST_MAX_SEGMENT_MS = 60_000
 
         /**
          * Minimum speech before a first utterance may enrol the owner
@@ -458,7 +474,12 @@ class WakeWordService : Service() {
             val permission = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
             val sttActive = SpeechRecognitionManager.state.value != RecognitionState.IDLE
-            val ttsActive = VoiceOutputState.isSpeaking.value || VoiceOutputState.isSynthesizing.value
+            // [T-tts-barge-in] Read-aloud audio no longer stops the engine: it
+            // keeps listening so "停一下 / 别说了" can cut the playback, and
+            // onWakeHit ignores wake-word hits while the assistant itself is
+            // audible. Only synthesis with nothing playing yet leaves the gate
+            // untouched (starting the engine early is harmless).
+            val speaking = VoiceOutputState.isSpeaking.value
             val inAppCapture = inAppCapturePaused
             val waking = now < wakingUntil
             val inGrace = now - serviceStartedAt < STARTUP_GRACE_MS
@@ -484,7 +505,6 @@ class WakeWordService : Service() {
                 // the microphone. A composer-mode flag would stay stale after
                 // backgrounding and could silence the wake word.
                 sttActive -> "语音识别进行中"
-                ttsActive -> "正在播报，避免听到自己"
                 else -> null
             }
             val shouldListen = reason == null
@@ -513,9 +533,26 @@ class WakeWordService : Service() {
                         engineError = null
                         nextEngineRetryAt = 0L
                     }
+                    // [T-tts-barge-in] While read-aloud audio is playing,
+                    // watch the same frames for the spoken stop phrase. The
+                    // engine stays up (the old gate stopped it to avoid
+                    // hearing itself); onWakeHit drops wake-word hits during
+                    // playback, so only an explicit stop command acts.
+                    if (speaking) {
+                        if (bargeInVad == null) {
+                            installBargeInVad(VoiceOutputState.currentSpeechText.value)
+                        }
+                    } else if (bargeInVad != null) {
+                        removeBargeInVad()
+                    }
                     publish(VoiceWakePhase.WAITING, "等待唤醒词「${WakeWordSettings.wakeWord.value}」")
+                } else if (bargeInVad != null) {
+                    // The engine is (re)starting; the old onFrame hook went
+                    // with it. Reinstall on the next tick once it listens.
+                    removeBargeInVad()
                 }
             } else {
+                if (bargeInVad != null) removeBargeInVad()
                 if (engine != null || engineStarting) stopEngine()
                 val phase = when {
                     !enabled -> VoiceWakePhase.OFF
@@ -645,11 +682,17 @@ class WakeWordService : Service() {
     private fun onWakeHit(word: String) {
         val now = SystemClock.elapsedRealtime()
         if (now < wakingUntil || destroying || conversationState != ConversationState.IDLE) return
+        // [T-tts-barge-in] The engine now stays up while read-aloud audio is
+        // playing, so the stop phrase can be heard. A wake-word hit in that
+        // window is the assistant's own voice leaking into the microphone,
+        // not the user — drop it before it arms the suppression window.
+        if (VoiceOutputState.isSpeaking.value) {
+            AppLogger.info(TAG, "忽略播报期间的唤醒命中「$word」")
+            VoiceWakeState.trace(this, "忽略播报期间的唤醒命中 $word")
+            return
+        }
         wakingUntil = now + WAKE_SUPPRESS_MS
-        // Log what the gate believed at the moment of the hit. A hit with
-        // ttsSpeaking=true means the listener heard the assistant's own
-        // voice — that is pilot's "agent talks to itself" trap, and the fix
-        // is the TTS gate, not the model.
+        // Log what the gate believed at the moment of the hit.
         val ttsSpeaking = VoiceOutputState.isSpeaking.value
         val ttsSynthesizing = VoiceOutputState.isSynthesizing.value
         val stt = SpeechRecognitionManager.state.value
@@ -926,6 +969,14 @@ class WakeWordService : Service() {
                 AppLogger.info(TAG, line)
                 VoiceWakeState.trace(this, line)
             },
+            // [T-voice-request-silence] A request is ended by the speaker
+            // going quiet, not by a wall clock. Natural mid-sentence pauses
+            // of half a second are normal in dictation; the old 600 ms cut
+            // sent only the first half of a long request to the model. The
+            // 8 s conversation deadline behaves the same way: it only expires
+            // during silence (see handleConversationTick).
+            minSilenceMs = { REQUEST_SILENCE_MS },
+            maxSegmentMs = { REQUEST_MAX_SEGMENT_MS },
         )
         vad = detector
         engine?.onFrame = { frame, len -> detector.feed(frame, len) }
@@ -974,8 +1025,15 @@ class WakeWordService : Service() {
      * ignored as echo.
      */
     private suspend fun onBargeInSegment(pcm: ShortArray, reply: String) {
-        if (conversationState != ConversationState.REPLYING || destroying) return
-        if (!VoiceOutputState.isSpeaking.value || bargeInBusy) return
+        if (destroying || bargeInBusy) return
+        // [T-tts-barge-in] Two contexts install this detector: the wake
+        // conversation while its own reply plays (REPLYING), and the idle
+        // service while any read-aloud channel is audible. Both must accept
+        // a stop command; every other state ignores the segment.
+        val replying = conversationState == ConversationState.REPLYING
+        val idleReadAloud = conversationState == ConversationState.IDLE
+        if (!replying && !idleReadAloud) return
+        if (!VoiceOutputState.isSpeaking.value) return
         bargeInBusy = true
         try {
             // No voiceprint gate here: the segment is a mixture of the
@@ -990,9 +1048,13 @@ class WakeWordService : Service() {
                 ack = ackText,
             ) ?: return
             if (text.isBlank()) return
+            // In the wake conversation the reference is the whole reply; for
+            // an idle read-aloud channel it is the sentence currently on the
+            // speaker, published by the player that owns the capsule.
+            val echoSource = if (replying) reply else VoiceOutputState.currentSpeechText.value
             val normalized = WakeStopPhrase.normalize(text)
             if (normalized.length >= 2 &&
-                WakeStopPhrase.normalize(reply).contains(normalized)
+                WakeStopPhrase.normalize(echoSource).contains(normalized)
             ) {
                 AppLogger.info(TAG, "忽略播报回声「$text」")
                 return
@@ -1017,7 +1079,13 @@ class WakeWordService : Service() {
     private fun stopSpeakingNow() {
         speechStopRequested = true
         runCatching { tts?.stop() }
+        // [T-tts-barge-in] The cloud reply channel and local assistant
+        // announcements play through ReadAloudPlayer, which this service's
+        // own TTS cannot reach. Stop them all so the spoken stop command
+        // silences whichever channel is audible.
+        runCatching { VoiceOutputState.stopAllPlayers() }
         VoiceOutputState.isSpeaking.value = false
+        VoiceOutputState.currentSpeechText.value = ""
         AppLogger.info(TAG, "停止播报")
     }
 
@@ -1071,11 +1139,16 @@ class WakeWordService : Service() {
                 publish(VoiceWakePhase.ERROR, "需要麦克风权限")
             }
             conversationState == ConversationState.LISTENING && now > conversationDeadline -> {
-                // The window closed, but the VAD may still be holding an
-                // unfinished utterance — the user spoke without the pause
-                // that cuts a sentence. Push it out instead of throwing it
-                // away together with the segment.
-                if (vad?.flush() == true) {
+                // [T-voice-request-silence] The window is a SILENCE window:
+                // while the user is still speaking, renew it instead of
+                // flushing the sentence mid-word. A long request with no
+                // 1.2 s pause used to be cut here after 8 s, and only its
+                // first half reached the model. The VAD now decides the end
+                // of the request; this deadline only closes a quiet mic.
+                val detector = vad
+                if (detector?.isInSpeech == true) {
+                    conversationDeadline = now + CONVERSATION_WINDOW_MS
+                } else if (detector?.flush() == true) {
                     conversationDeadline = now + FLUSH_GRACE_MS
                     AppLogger.info(TAG, "窗口到点，但 VAD 里还有半句，先处理")
                 } else {

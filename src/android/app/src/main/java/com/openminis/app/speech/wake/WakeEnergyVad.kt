@@ -25,10 +25,13 @@ class WakeEnergyVad(
     /**
      * Longest utterance before it is cut even without a pause.
      *
-     * The barge-in listener uses a much shorter limit than the request
-     * recorder: while the assistant talks there is no punctuation guarantee
-     * in the captured audio, and a stop command must be recognised within a
-     * second or two.
+     * This is a safety valve, NOT the endpointing rule: a request ends when
+     * the speaker goes quiet for [minSilenceMs], no matter how long it runs.
+     * The old 15 s default was short enough to chop a long dictation in half
+     * ("长语音只进去前半段") even though the user never paused. The barge-in
+     * listener still overrides this with a much shorter limit: while the
+     * assistant talks there is no punctuation guarantee in the captured
+     * audio, and a stop command must be recognised within a second or two.
      */
     private val maxSegmentMs: () -> Int = { MAX_SEGMENT_MS },
     /**
@@ -197,7 +200,7 @@ class WakeEnergyVad(
         private const val MIN_RMS = 260.0
         private const val DEFAULT_SILENCE_MS = 600
         private const val MIN_SPEECH_MS = 300
-        private const val MAX_SEGMENT_MS = 15_000
+        private const val MAX_SEGMENT_MS = 60_000
         private const val PRE_ROLL_FRAMES = 15 // 300ms
     }
 }

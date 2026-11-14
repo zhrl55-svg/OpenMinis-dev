@@ -166,6 +166,10 @@ class ReadAloudPlayer(context: Context) {
         VoiceOutputState.registerPlayer(this)
         worker = scope.launch {
             for (text in queue) {
+                // [T-tts-barge-in] Publish what is about to be audible so the
+                // wake service's idle barge-in can reject its own echo when
+                // matching a spoken stop command.
+                if (ownsCapsule()) VoiceOutputState.currentSpeechText.value = text
                 try {
                     runCatching { speakOne(text) }
                         .onFailure { AppLogger.error(TAG, "utterance failed: $it") }
@@ -185,8 +189,7 @@ class ReadAloudPlayer(context: Context) {
                 // Queue drained → speech is over. Counter rather than
                 // Channel.isEmpty, which is experimental API.
                 if (pending.decrementAndGet() <= 0) {
-                    _isSpeaking.value = false
-                    if (ownsCapsule()) VoiceOutputState.isSpeaking.value = false
+                    clearSpeakingState()
                 }
             }
         }
@@ -272,6 +275,26 @@ class ReadAloudPlayer(context: Context) {
         enqueue(text)
     }
 
+    /**
+     * [T-local-tts-capsule] Speak a short announcement that answers a local
+     * voice request (assistant fast path result, completion, cancellation).
+     *
+     * Deliberately NOT gated by the read-replies switch: a question asked by
+     * voice must get an audible answer even when automatic reply read-aloud
+     * is off. The switch governs narration of model replies, not the
+     * assistant's own voice responses. Mute, mic-capture suppression and the
+     * text sanitizer still apply, and the player still registers with
+     * [VoiceOutputState] while it speaks — so the composer's speaker button
+     * and the floating capsule show the same animation as a cloud reply, and
+     * the same stop controls (capsule, speaker button, wake stop phrase)
+     * reach the utterance.
+     */
+    fun speakLocal(text: String) {
+        if (text.isBlank()) return
+        stop()
+        enqueueLocal(text)
+    }
+
     private fun enqueue(raw: String) {
         // [T-android-tts-capsule] Temporary mute suppresses NEW utterances too
         // (not only current playback) — matching iOS, where `canPlay =
@@ -292,6 +315,30 @@ class ReadAloudPlayer(context: Context) {
         }
         // Sanitize here, not at playback: a chunk that is pure Markdown (e.g. a
         // fenced code block) sanitizes to empty and must not occupy the queue.
+        val clean = VoiceTextSanitizer.sanitize(raw, linkPhrases)
+        if (clean.isBlank()) return
+        pending.incrementAndGet()
+        _isSpeaking.value = true
+        if (ownsCapsule()) VoiceOutputState.isSpeaking.value = true
+        queue.trySend(clean)
+    }
+
+    /**
+     * [T-local-tts-capsule] Same queue mechanics as [enqueue], minus the
+     * read-replies gate. Mute is still honoured: it is the explicit "speaker
+     * off" control, and the capsule's double-tap mute must not be immediately
+     * contradicted by the next local announcement.
+     */
+    private fun enqueueLocal(raw: String) {
+        if (VoiceOutputState.isMuted.value) {
+            AppLogger.info(TAG, "local announcement dropped — muted")
+            return
+        }
+        val recState = SpeechRecognitionManager.state.value
+        if (recState == RecognitionState.RECORDING || recState == RecognitionState.STARTING) {
+            AppLogger.info(TAG, "local announcement dropped — mic capturing (state=$recState)")
+            return
+        }
         val clean = VoiceTextSanitizer.sanitize(raw, linkPhrases)
         if (clean.isBlank()) return
         pending.incrementAndGet()
@@ -331,11 +378,7 @@ class ReadAloudPlayer(context: Context) {
         system.stop()
         focus.releaseNow(this)
         pending.set(0)
-        _isSpeaking.value = false
-        if (ownsCapsule()) {
-            VoiceOutputState.isSpeaking.value = false
-            VoiceOutputState.isSynthesizing.value = false
-        }
+        clearSpeakingState()
         AppLogger.info(TAG, "suspended for mic capture — held ${heldForCapture.size} utterance(s)")
     }
 
@@ -369,10 +412,30 @@ class ReadAloudPlayer(context: Context) {
         // [T-readaloud-focus] Stop / mute / disable / dispose: no grace.
         focus.releaseNow(this)
         pending.set(0)
+        clearSpeakingState()
+    }
+
+    /**
+     * [T-local-tts-capsule] Drop the local speaking flag and, when this player
+     * owns the capsule, the shared mirror the composer's speaker button and
+     * the floating capsule render from.
+     *
+     * WHY ownership is sampled BEFORE flipping [isSpeaking]: a collector
+     * resuming from that flip on `Dispatchers.Main.immediate` can run inline —
+     * the local-announcement job does exactly that, and its `finally`
+     * unregisters this player. By the time the old code re-checked
+     * [ownsCapsule] the player was off the stack, so the mirror write was
+     * skipped and `VoiceOutputState.isSpeaking` stayed true: the speaker kept
+     * pulsing after the audio had ended. Sampling first makes the clear
+     * independent of what the collector does on resume.
+     */
+    private fun clearSpeakingState() {
+        val owned = ownsCapsule()
         _isSpeaking.value = false
-        if (ownsCapsule()) {
+        if (owned) {
             VoiceOutputState.isSpeaking.value = false
-            if (ownsCapsule()) VoiceOutputState.isSynthesizing.value = false
+            VoiceOutputState.isSynthesizing.value = false
+            VoiceOutputState.currentSpeechText.value = ""
         }
     }
 

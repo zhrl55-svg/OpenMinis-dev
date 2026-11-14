@@ -120,7 +120,8 @@ object FileReadTool {
         if (isBinary) {
             return ToolExecutionResult(
                 "[$path | $size bytes | binary file — cannot display contents]",
-                true, toolTitle = toolTitle
+                true, toolTitle = toolTitle,
+                spokenSummary = "已读取 ${spokenName(path)}，这是二进制文件，没有朗读内容。",
             )
         }
 
@@ -189,6 +190,16 @@ object FileReadTool {
                       else ", retry with a smaller lines value"
         }
         header += "]"
-        return ToolExecutionResult("$header\n$content", true, toolTitle = toolTitle)
+        return ToolExecutionResult(
+            "$header\n$content", true, toolTitle = toolTitle,
+            // Say which file and how large it is, not the contents: a voice
+            // user needs to know the read succeeded, while code/config text
+            // read aloud is noise. The bubble carries the full content.
+            spokenSummary = "已读取 ${spokenName(path)}，共 $totalLines 行。",
+        )
     }
+
+    /** File name for TTS; the full Linux path is noise when spoken. */
+    private fun spokenName(path: String): String =
+        path.substringAfterLast('/').ifBlank { path }
 }

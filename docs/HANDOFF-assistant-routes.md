@@ -537,3 +537,195 @@ src/android/app/src/test/java/com/openminis/app/assistant/
    `debug.net.httpGet` tailnet 200）。
 2. 原唱版权：周杰伦等歌手在网易云无版权，只能放翻唱；如需原唱要换音源。
 3. 播放器没有后台常驻/通知栏控制（进程被系统回收时停止）。
+
+---
+
+## 11. 新闻与 A 股行情（P0，2026-11-14）
+
+### 11.1 新增工具
+
+- `tools/NewsSearchTool.kt` — `news_search`
+  - Google News RSS，24 小时优先、结果不足 5 条回退 7 天；
+  - 输出 5 条标题 + 来源 + 时间 + 摘要，**不抓正文**（正文交给 `browser_use`，
+    避免重复实现 HTML 提取）；
+  - 解析器是纯 JDK DOM，可在 JVM 单测里直接测。
+- `tools/StockQuoteTool.kt` — `stock_quote`
+  - 新浪 `hq.sinajs.cn`，必须带 `Referer`，响应按 **GBK** 解码；
+  - 支持上证/深证/创业板/沪深300 和「大盘」等泛称；
+  - 个股、基金、ETF、美股/港股、上证50/中证500 等明确返回「暂不支持」，
+    不再像 pilot 的 StockTool 那样静默回退三大指数。
+
+两个工具都已加入 `AgentTools.makeAgentTools()`，所以云端 Agent 和定时任务
+可以直接调用，不需要 API Key。
+
+### 11.2 本地助理路由
+
+- `LocalCapabilityRegistry`：`news_search/search`、`stock_quote/quote`（只读）。
+- `DefaultAssistantRoutes`：新增 `info.news`（priority 168）和
+  `info.stock`（158）；**`SEED_VERSION` 升到 6**，已有安装通过 migrate 自动补齐。
+- `SlotExtractor`：两个能力的 `query` 都是**可选槽**，直接把用户原句交给工具
+  归一化；因此端侧快路径不需要调用 0.3B 模型。`missing` 为空即直接执行。
+- `LocalActionSpeech` / `AssistantFastPath` / `ChatToolFormatting`：补了
+  「查询新闻」「查询行情」、工具图标和英文名。
+
+### 11.3 路由边界（防止互相抢词）
+
+- 「每天帮我总结新闻」仍走 `scheduled_task/create`（news 路由 exclude 每天/每周/定时）。
+- 「股票新闻 / 财经新闻 / 股市消息」走 `news_search`，stock 路由 exclude 新闻/消息。
+- 「上证指数现在多少 / 今天大盘怎么样」走 `stock_quote`。
+- 「指数基金怎么买」「新闻学专业怎么样」「我们在讨论股票接口的方案」留在云端。
+- 「附近有超市吗」仍走已有的 `amap_search`，本次没有新增任何 POI/导航能力。
+
+### 11.4 测试
+
+- `NewsSearchToolTest`：查询归一化、RSS 解析、HTML 清洗、时间解析。
+- `StockQuoteToolTest`：GBK 响应解析、方向和点数格式化、指数选择、个股拒绝。
+- `AssistantRouteCorpusTest`：新增 6 条新闻/行情样例 + 4 条反例。
+- `SlotExtractorTest`：确认两个能力的 query 可选且不需要模型。
+- 已通过：
+  `AssistantRouteCorpusTest`、`SlotExtractorTest`、`AssistantRouteStoreTest`、
+  `AssistantRoutesCollectionTest`、`AgentToolSwitchTest`、
+  `SubAgentToolSchemaTest`、`NewsSearchToolTest`、`StockQuoteToolTest`。
+- `:app:assembleGithubDebug` / `:app:assembleGithubPerf` 成功。
+- 真机（ELS-AN00）：
+  - `今天有什么科技新闻` → `news_search` 1.6s，日志 `voice: announce 找到 5 条新闻。第 1 条…`
+  - `上证指数现在多少` → `stock_quote` 131ms，日志 `voice: announce 上证指数 3634.35 点，跌 0.59%`
+
+### 11.5 已知限制 / 后续
+
+1. Google News RSS 在纯国内网络可能不可达；失败时返回明确错误，不静默当成
+   「没有新闻」。后续可把 RSS base 做成可配置或加备用源。
+2. 个股行情未做代码解析（新浪 suggest）；当前明确拒绝，P1 再接。
+3. 本地快路径现在会播报 `spokenSummary`：新闻念前 3 条标题（带来源），
+   行情念全部返回指数的「名称 点数，涨跌」，由
+   `LocalActionVoiceConfirmer.announceSummary()` 走 TTS；气泡仍显示完整结果。
+   2026-11-14 下午起该播报改走 `ReadAloudPlayer`，见 §12。
+4. 语音唤醒（`WakeConversation`）仍走 `HeadlessChatRunner`（headless=true），
+   会绕过本地快路径；它播报的是云端模型的最终回复。若要让唤醒词也用本地
+   新闻/行情工具，需要给 headless 路径加显式的本地快速路径开关（P2）。
+
+---
+
+## 12. 本地工具语音播报：三层策略 + 输入框小喇叭/胶囊（2026-11-14 下午）
+
+需求：新闻/行情之外的工具也要有语音反馈；播报要复用云端回复朗读时的输入框
+小喇叭和浮动胶囊动画，支持手动停止，也支持语音关键词（「停一下」等）打断。
+
+### 12.1 三层播报策略
+
+`LocalActionSpeech.shouldSpeakCompletion(capability, action, readOnly)`：
+
+1. **内容型只读结果** → 播 `spokenSummary`（`ToolExecutionResult` 或
+   `LocalSpokenSummary` 生成）。覆盖：
+   - `news_search`：前 3 条标题 + 来源；
+   - `stock_quote`：「名称 点数，涨/跌 x%」；
+   - `amap_search`：「找到 N 个“query”：最近 3 个名字 + 距离」；
+   - `file_read`：「已读取 <文件名>，共 N 行」/ 二进制说明；
+   - `weather`/`device`：`LocalResultFormatter.answer` 的一句中文；
+   - `calendar list`、`calendar freebusy`（第一个空闲时段）、`reminder
+     list/pending`、`note search/list`、`contacts search`、`media status/list`、
+     `scheduled_task list`、`memory_get`：条数 + 前 2~3 个名字。
+2. **改变状态的动作** → 播通用完成句「已<动作>：<目标>」（无需确认卡也播）。
+   目标参数链扩展为 title → name → app → id_or_title → label → url → prompt → query。
+3. **媒体控制与读图保持安静**（`media` / `read_image`）：播放器 UI 已经反映新
+   状态，图片内容不适合一句话朗读。
+
+`LocalSpokenSummary`（`assistant/execution/`）只放纯函数：
+`forCapability()` 处理生活能力，`forTool()` 处理 `memory_get` 等工具；
+JSON 数组/对象优先找 `items/notes/reminders/events/contacts/sessions/results/
+tasks/data`，取 `title/name/label/content/text` 作为条目名；失败、空结果分别
+返回空串或「没有找到结果。」，最终统一切到 220 字以内。
+
+### 12.2 复用云端朗读的播放器与胶囊
+
+`LocalActionVoiceConfirmer` 的结果播报改用独立的 `ReadAloudPlayer`，不再用确认
+提示的 `TextToSpeechManager`：
+
+- `ReadAloudPlayer.speakLocal(text)`：新增入口，**不受「朗读回复」开关限制**
+  （语音问的问题必须语音答），但仍尊重静音、麦克风占用与文本清洗；
+- 播报前 `VoiceOutputState.registerPlayer(reader)`、播完
+  `unregisterPlayer`，所以 `VoiceOutputState.isSpeaking` / 输入框
+  `ComposerSpeakingButton` / `SpeechPlayerCapsule` 都按云端回复同样的动画显示；
+  只有播报期间占据胶囊，不会永久抢走回复通道的播放器；
+- 手动停止：胶囊关闭/静音、输入框小喇叭、发送键旁停止按钮都走
+  `VoiceOutputState.activePlayer?.stop()`，行为与云端朗读一致；
+- 新增 `VoiceOutputState.stopAllPlayers()`，供语音打断一次停掉所有播放器。
+
+**播报结束后小喇叭仍闪的修复**：`ReadAloudPlayer` 原先在清
+`VoiceOutputState.isSpeaking` 之前才检查 `ownsCapsule()`。播报协程在
+`Dispatchers.Main.immediate` 上等待 `isSpeaking`，`_isSpeaking` 翻 false 时
+collector 可能**内联恢复**并先执行 `finally { unregisterPlayer() }`，于是
+`ownsCapsule()` 已经变 false，共享镜像没被清掉 —— 音频结束但输入框小喇叭
+一直闪。现在 `clearSpeakingState()` 在翻转 `isSpeaking` **之前**采样所有权，
+再清 `isSpeaking/isSynthesizing/currentSpeechText`；`stop()` 与
+`suspendForCapture()` 共用同一入口。
+
+### 12.3 语音关键词打断（空闲态也生效）
+
+`WakeWordService`：
+
+- 取消「正在播报就停引擎」的 gate；播报期间引擎继续听，`gateLoop` 安装
+  barge-in VAD（`installBargeInVad`）；
+- `onWakeHit` 在 `VoiceOutputState.isSpeaking` 时忽略唤醒命中（自己的声音），
+  避免自唤醒，也避免误开抑制窗口；
+- `onBargeInSegment` 放宽到 **IDLE + 正在播报**：转写后用
+  `VoiceOutputState.currentSpeechText`（当前播放句，`ReadAloudPlayer` 发布）
+  做回声剔除，命中 `WakeStopPhrase`（停一下/别说了/安静…）就
+  `stopSpeakingNow()`；
+- `stopSpeakingNow()` 现在先 `VoiceOutputState.stopAllPlayers()`，再清
+  `isSpeaking` / `currentSpeechText`，所以云端回复、选区朗读、本地播报都能被
+  「停一下」打断。
+
+### 12.4 测试与真机验证（ELS-AN00 / MDX0220A21035172）
+
+单测：
+
+- `LocalSpokenSummaryTest`（11）：天气/设备原句、日程列表、freebusy、
+  联系人、空结果、media status、写入/失败静默、memory_get、长度上限；
+- `LocalActionSpeechTest`（+2）：目标参数链（label/url/prompt）、三层策略；
+- `FileReadToolSpeechTest`（2）：行数摘要、二进制不朗读正文；
+- 原有 `NewsSearchToolTest` / `StockQuoteToolTest` / `AssistantRouteCorpusTest`
+  / `SlotExtractorTest` / `LocalResultFormatterTest` 全绿。
+
+真机：
+
+- 「今天有什么科技新闻」→ 结果后出现**输入框小喇叭 + 浮动胶囊**，播报前 3 条；
+- 播报中点输入框小喇叭 → 立即停止，胶囊消失（日志 `ReadAloudFocus abandon`、
+  `Minis.VoiceWake: 停止播报`）；
+- 播报中对手机说「停一下」（PC 扬声器播 SAPI 语音）→
+  `检测到语音停止指令「停一下」，中止播报` + `VoiceOutputState.stopAllPlayers()`
+  → 胶囊消失；期间 VAD 日志显示 `忽略播报回声「新浪财」`，证明回声剔除生效；
+- 「记个笔记：明天买牛奶」→ 无需确认卡，仍播「已新建笔记：明天买牛奶」，
+  胶囊同步显示；媒体控制按策略保持安静；
+- 自然播完后 12s 抓 `debug.viewTree`：不再存在「停止播报」节点（修复前存在）。
+
+---
+
+## 13. 长语音只进去前半段：按静音断句，不再固定限时（2026-11-14 晚）
+
+现象（用户反馈）：语音输入长句时像被限时，只有前半段进入识别结果；
+用户建议「应该检测中间的静音时长」。
+
+根因有两层，都在共享的 `WakeEnergyVad` / 会话窗口：
+
+1. `WakeEnergyVad` 默认 **600ms 静音就断句**、**15s 连续语音强制切段**。
+   长听写中的自然停顿被当成句尾；每段都要重新过声纹，任何一段被拒就
+   丢掉一截。唤醒对话里第一段通过后立即进入 REPLYING，后半段直接不再处理。
+2. `WakeWordService` 的 `CONVERSATION_WINDOW_MS = 8s` 是**从唤醒/应答结束
+   起算的墙钟**：用户连续说超过 8s，`handleConversationTick` 会
+   `vad.flush()` 把没说完的半句提前送走 —— 正是「限时、只有前半段」。
+
+修复：
+
+- `WakeEnergyVad` 默认 `MAX_SEGMENT_MS` 15s → **60s**，并在注释里明确它只是
+  安全阀，不是断句规则；barge-in 仍显式传 1.5s，行为不变。
+- 请求录音（唤醒对话 `installVad()` 与按住说话 `HoldToTalkController`）：
+  - `minSilenceMs = 1_200ms`：句中半秒级停顿不再断句；
+  - `maxSegmentMs = 60_000ms`：连续长语音不再 15s 被切；
+- `handleConversationTick`：8s 窗口改为**静音窗口**——`vad.isInSpeech == true`
+  时续期，不再 flush；只有真正静音且 VAD 无缓存时才休眠。
+- `HoldToTalkController` 仍逐段追加文本；更少的段 = 更少的声纹复检，
+  降低「后段被声纹拒绝而丢失」的概率。
+
+单测：`WakeEnergyVadTest`（3）——580ms 停顿不断句、15s 连续语音不切、
+20s 安全阀仍生效。`:app:assembleGithubPerf` 构建并安装成功。

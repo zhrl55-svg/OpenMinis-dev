@@ -208,10 +208,14 @@ object AmapSearchTool {
             return ToolExecutionResult(
                 if (loc != null) "附近 ${radius}m 内没有找到「$query」" else "没有找到「$query」",
                 true,
+                spokenSummary = if (loc != null) "附近没有找到「$query」" else "没有找到「$query」",
             )
         }
 
         val sb = StringBuilder()
+        // 前三个结果用于语音播报：名字 + 距离，「周边搜索」在语音场景下
+        // 用户最关心的就是「最近的是什么、多远」。完整列表仍在气泡里。
+        val spoken = mutableListOf<String>()
         var dropped = 0
         var shown = 0
         for (i in 0 until pois.length()) {
@@ -231,11 +235,15 @@ object AmapSearchTool {
             if (distM != null) sb.append("（").append(distM.toInt()).append("m）")
             if (address.isNotBlank()) sb.append(" — ").append(address)
             sb.append('\n')
+            if (spoken.size < 3) {
+                spoken += if (distM != null) "$name，${distM.toInt()}米" else name
+            }
         }
         if (shown == 0) {
             return ToolExecutionResult(
                 "找到的「$query」都在 ${MAX_SANE_DISTANCE_M / 1000}km 之外，已全部丢弃。",
                 true,
+                spokenSummary = "找到的「$query」都太远了，没有可用的结果。",
             )
         }
         val header = if (loc != null) {
@@ -244,6 +252,15 @@ object AmapSearchTool {
             "「$query」的结果：\n"
         }
         val tail = if (dropped > 0) "\n（已丢弃 $dropped 个距离过远的结果）" else ""
-        return ToolExecutionResult(header + sb.toString().trimEnd() + tail, true)
+        val spokenSummary = buildString {
+            append("找到 ").append(shown).append(" 个「").append(query).append("」")
+            if (spoken.isNotEmpty()) append("：").append(spoken.joinToString("；"))
+            append("。")
+        }
+        return ToolExecutionResult(
+            header + sb.toString().trimEnd() + tail,
+            true,
+            spokenSummary = spokenSummary,
+        )
     }
 }

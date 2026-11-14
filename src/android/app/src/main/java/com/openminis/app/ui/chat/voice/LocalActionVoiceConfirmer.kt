@@ -7,8 +7,10 @@ import com.openminis.app.assistant.execution.VoiceConfirmationDecision
 import com.openminis.app.i18n.LocaleWrap
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.speech.RecognitionState
+import com.openminis.app.speech.ReadAloudPlayer
 import com.openminis.app.speech.SpeechRecognitionManager
 import com.openminis.app.speech.TextToSpeechManager
+import com.openminis.app.speech.VoiceOutputState
 import com.openminis.app.speech.wake.WakeWordService
 import com.openminis.app.ui.chat.LocalActionConfirmation
 import kotlinx.coroutines.CancellationException
@@ -22,6 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -115,15 +118,19 @@ class LocalActionVoiceConfirmer(context: Context) {
             runCatching { SpeechRecognitionManager.cancelRecording() }
         }
         runCatching { tts.stop() }
+        stopAnnouncement()
     }
 
     /** ViewModel 销毁时调用。 */
     fun release() {
         stop()
-        announceJob?.cancel()
-        announceJob = null
         scope.cancel()
         runCatching { tts.shutdown() }
+        announcementPlayer?.let {
+            VoiceOutputState.unregisterPlayer(it)
+            runCatching { it.shutdown() }
+        }
+        announcementPlayer = null
     }
 
     /**
@@ -159,31 +166,95 @@ class LocalActionVoiceConfirmer(context: Context) {
         announce(if (chinese) "已取消" else "Cancelled")
     }
 
+    /**
+     * Speak a short read-only result summary (news headlines, index quotes).
+     * No microphone is opened: this is a one-way readout after the turn
+     * already ran.
+     */
+    fun announceSummary(text: String) {
+        if (text.isBlank()) return
+        announce(text)
+    }
+
+    /**
+     * [T-local-tts-capsule] Announcement channel for result readouts.
+     *
+     * WHY a [ReadAloudPlayer] instead of the confirmation [tts]: the composer
+     * speaker button and the floating capsule both render [VoiceOutputState],
+     * so routing an announcement through the same player as a cloud reply
+     * gives it the same speaking animation, the same manual stop (capsule or
+     * speaker button), and the same wake stop-phrase barge-in. The player is
+     * placed on the registry stack only while it has something to say —
+     * registering it for the session would make it the capsule's permanent
+     * owner and steal the controls from the reply channel.
+     */
+    private var announcementPlayer: ReadAloudPlayer? = null
+
+    private val player: ReadAloudPlayer
+        get() = announcementPlayer ?: ReadAloudPlayer(appContext).also {
+            // Construction registers the player; leave it off the stack until
+            // an announcement actually starts.
+            VoiceOutputState.unregisterPlayer(it)
+            announcementPlayer = it
+        }
+
+    /**
+     * Guards the per-announcement register/unregister pair: a cancelled job's
+     * finally runs after the job that replaced it may already own the player.
+     */
+    private var announceGeneration = 0
+
     private var announceJob: Job? = null
 
     private fun announce(text: String) {
         if (text.isBlank()) return
+        val generation = ++announceGeneration
         announceJob?.cancel()
         announceJob = scope.launch {
             try {
-                if (!tts.awaitReady()) {
-                    AppLogger.info(TAG, "announce skipped (tts unavailable): $text")
-                    return@launch
-                }
                 // 稍等一拍：唤醒确认的短应答可能还在播，避免两个 TTS 实例抢话。
                 delay(ANNOUNCE_DELAY_MS)
                 AppLogger.info(TAG, "announce: $text")
                 com.openminis.app.llm.mnn.AssistantFastPath.trace(appContext, "voice: announce $text")
-                tts.speak(text)
-                AppLogger.info(TAG, "announce started speaking=${tts.isSpeaking.value}")
-                withTimeoutOrNull(TTS_TIMEOUT_MS) {
-                    while (tts.isSpeaking.value && isActive) delay(80)
+                val reader = player
+                VoiceOutputState.registerPlayer(reader)
+                try {
+                    reader.speakLocal(text)
+                    if (reader.isSpeaking.value) {
+                        // Wait for the queue to drain. The cap is generous:
+                        // a full news readout is ~200 Chinese characters and
+                        // a slow voice can take close to a minute. Stopping
+                        // on timeout also resets the capsule state, so a
+                        // wedged engine cannot leave the speaker UI stuck.
+                        val finished = withTimeoutOrNull(ANNOUNCE_TIMEOUT_MS) {
+                            reader.isSpeaking.first { !it }
+                        } != null
+                        if (!finished) reader.stop()
+                    }
+                } finally {
+                    // Only the latest announcement may hand the capsule back;
+                    // a stale finally must not unregister the player while
+                    // its replacement is still speaking.
+                    if (generation == announceGeneration) {
+                        VoiceOutputState.unregisterPlayer(reader)
+                    }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 AppLogger.warning(TAG, "announce failed: ${t.javaClass.simpleName}: ${t.message}")
             }
+        }
+    }
+
+    /** 中止正在播放的结果播报（新一轮确认/释放时调用）。 */
+    private fun stopAnnouncement() {
+        announceJob?.cancel()
+        announceJob = null
+        announceGeneration++
+        announcementPlayer?.let {
+            runCatching { it.stop() }
+            VoiceOutputState.unregisterPlayer(it)
         }
     }
 
@@ -421,6 +492,9 @@ class LocalActionVoiceConfirmer(context: Context) {
 
         /** 播报上限：确认提示最多二十来秒，失控时也要把麦克风还回去。 */
         private const val TTS_TIMEOUT_MS = 20_000L
+
+        /** 结果播报上限：摘要比确认提示长，念完前不能把播放器掐掉。 */
+        private const val ANNOUNCE_TIMEOUT_MS = 60_000L
 
         /** 播报提示后的聆听窗口：一句话足够；超时后主动 stop 转写。 */
         private const val LISTEN_WINDOW_MS = 5_000L

@@ -51,6 +51,11 @@ data class LocalExecutionResult(
      * 由 [LocalResultFormatter] 生成：JSON 结果翻成一句话，纯文本原样显示。
      */
     val answer: String = "",
+    /**
+     * 只读信息类结果的简短语音摘要（新闻标题、指数行情）。
+     * 空串表示不自动播报；不影响气泡里的完整 [answer]。
+     */
+    val spokenSummary: String = "",
 )
 
 /**
@@ -154,15 +159,23 @@ class LocalCapabilityExecutor(private val context: Context) {
             NativeOffloadResult(1, "本地执行失败：${t.message ?: t.javaClass.simpleName}")
         }
         val success = result.exitCode == 0
+        val answer = LocalResultFormatter.answer(
+            capability = decision.capability,
+            action = decision.action,
+            output = result.output,
+            success = success,
+        )
         LocalExecutionResult(
             output = result.output.trim(),
             success = success,
             toolName = decision.capability,
             title = decision.args.optString("tool_title").ifBlank { decision.route.label },
-            answer = LocalResultFormatter.answer(
+            answer = answer,
+            spokenSummary = LocalSpokenSummary.forCapability(
                 capability = decision.capability,
                 action = decision.action,
                 output = result.output,
+                answer = answer,
                 success = success,
             ),
         )

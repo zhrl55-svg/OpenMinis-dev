@@ -164,4 +164,49 @@ class LocalActionSpeechTest {
             ),
         )
     }
+
+    @Test
+    fun `completion falls back through label url and prompt`() {
+        assertEquals(
+            "已设置闹钟：起床",
+            LocalActionSpeech.completion(
+                capability = "alarm", action = "set", chinese = true,
+                fallbackLabel = "Set alarm",
+                args = JSONObject().put("label", "起床"),
+                success = true, output = "{}",
+            ),
+        )
+        assertTrue(
+            LocalActionSpeech.completion(
+                capability = "browser_use", action = "navigate", chinese = true,
+                fallbackLabel = "Browser",
+                args = JSONObject().put("url", "https://example.com"),
+                success = true, output = "{}",
+            ).contains("example.com"),
+        )
+        assertTrue(
+            LocalActionSpeech.completion(
+                capability = "scheduled_task", action = "create", chinese = true,
+                fallbackLabel = "Scheduled task",
+                args = JSONObject().put("prompt", "每天总结新闻"),
+                success = true, output = "{}",
+            ).contains("每天总结新闻"),
+        )
+    }
+
+    @Test
+    fun `completion policy keeps media and image silent`() {
+        // 状态改变的动作：即使没有确认卡也要报一句「已…」。
+        assertEquals(true, LocalActionSpeech.shouldSpeakCompletion("calendar", "create", readOnly = false))
+        assertEquals(true, LocalActionSpeech.shouldSpeakCompletion("note", "create", readOnly = false))
+        assertEquals(true, LocalActionSpeech.shouldSpeakCompletion("app_launch", "open", readOnly = false))
+        // 媒体控制与读图保持安静。
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("media", "play", readOnly = false))
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("media", "pause", readOnly = false))
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("read_image", "read", readOnly = true))
+        // 只读内容型结果走摘要；没有摘要时也说不出有用信息。
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("news_search", "search", readOnly = true))
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("calendar", "list", readOnly = true))
+        assertEquals(false, LocalActionSpeech.shouldSpeakCompletion("file_read", "read", readOnly = true))
+    }
 }

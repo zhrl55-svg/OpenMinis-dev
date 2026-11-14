@@ -83,6 +83,24 @@ object LocalCapabilityRegistry {
             mapOf("search" to action("search", true, slots = arrayOf(slot("query", SlotType.QUERY)))),
         ),
         LocalCapability(
+            "news_search", "News",
+            mapOf(
+                "search" to action(
+                    "search", true,
+                    slots = arrayOf(slot("query", SlotType.QUERY, required = false)),
+                ),
+            ),
+        ),
+        LocalCapability(
+            "stock_quote", "Stock quotes",
+            mapOf(
+                "quote" to action(
+                    "quote", true,
+                    slots = arrayOf(slot("query", SlotType.QUERY, required = false)),
+                ),
+            ),
+        ),
+        LocalCapability(
             "calendar", "Calendar",
             mapOf(
                 "list" to action("list", true),

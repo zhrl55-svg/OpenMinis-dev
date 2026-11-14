@@ -21,6 +21,12 @@ data class ToolExecutionResult(
      */
     val imageLinuxPath: String? = null,
     /**
+     * A short, spoken summary for read-only information tools (news headlines,
+     * index quotes). Empty means "do not read the result aloud". The chat
+     * bubble still shows the full [output]; this is only for TTS.
+     */
+    val spokenSummary: String = "",
+    /**
      * True when the tool did not return within its per-tool-category timeout.
      * Distinct from generic `!success` so the UI can render a TIMEOUT status
      * (clock icon) instead of a FAILED status (error icon). Mirrors a failure
@@ -36,6 +42,7 @@ data class ToolExecutionResult(
             imageMimeType == other.imageMimeType && toolTitle == other.toolTitle &&
             pageURL == other.pageURL && imageFilePath == other.imageFilePath &&
             imageLinuxPath == other.imageLinuxPath &&
+            spokenSummary == other.spokenSummary &&
             timedOut == other.timedOut
     }
 
@@ -48,6 +55,7 @@ data class ToolExecutionResult(
         result = 31 * result + (pageURL?.hashCode() ?: 0)
         result = 31 * result + (imageFilePath?.hashCode() ?: 0)
         result = 31 * result + (imageLinuxPath?.hashCode() ?: 0)
+        result = 31 * result + spokenSummary.hashCode()
         result = 31 * result + timedOut.hashCode()
         return result
     }
